@@ -15,7 +15,7 @@ Repositorio: https://github.com/JhonAlex37/Api_Chatfuel
   evento creado y controla reintentos y comentarios repetidos.
 - Escucha cambios de chats mediante WebSocket y recupera pendientes al conectar.
 
-Versión actual: **2.1.19**. La agenda reconoce un «sí» a la oferta inmediatamente
+Versión actual: **1.0.1**. La agenda reconoce un «sí» a la oferta inmediatamente
 anterior aunque la extracción de intención de la IA quede pendiente. Los mensajes
 de agenda incorporan emojis; la reserva exige elegir y confirmar un horario.
 El motor original de DalIA conserva sus preguntas y scoring. El scoring nuevo
@@ -26,7 +26,7 @@ también está pendiente de verificación.
 
 ```text
 src/connector.mjs                  Servicio Bun independiente
-test/connector.test.mjs            36 pruebas con servicios simulados
+test/connector.test.mjs            39 pruebas con servicios simulados
 config/chatfuel/rch-questions.json Preguntas y captura autorizadas
 docs/MIGRACION.md                  Cambio al proyecto nuevo de Railway
 Dockerfile                        Imagen de ejecución
@@ -107,3 +107,9 @@ La revisión de tono y el reinicio solicitado por el cliente están versionados
 en `config/chatfuel/rch-questions.json`. Su aplicación en Chatfuel es separada
 del despliegue de Railway. Ver [docs/PRUEBAS.md](docs/PRUEBAS.md) para iniciar
 una nueva revisión y verificar la reserva real en Bitrix.
+
+## V1.0.1: horarios libres más separados
+
+La agenda reparte hasta tres opciones entre el inicio, la mitad y el final
+de la disponibilidad verificada. Si hay pocos huecos, muestra menos opciones
+para evitar horas consecutivas. Ver [docs/HORARIOS.md](docs/HORARIOS.md).

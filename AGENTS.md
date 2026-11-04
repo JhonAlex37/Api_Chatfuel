@@ -22,6 +22,9 @@ trabaje en este proyecto. Los cambios futuros de Chatfuel se realizan aquí.
 
 Por preferencia expresa del usuario, escribir los mensajes de commit y las
 etiquetas de versión en español, con versión y descripción breve. Formato:
-`V2.1.19: Corrige la aceptación de llamadas para abrir la agenda de Bitrix`.
+`V1.0.1: Ofrece horarios libres más separados`.
 Mantener la secuencia de versiones existente y asociar la etiqueta `Vx.y.z`
 a la revisión publicada. No reescribir commits que ya se compartieron.
+
+El usuario fijó expresamente `V1.0.1` para la publicación de horarios separados;
+usar esta secuencia en las próximas versiones, en lugar de continuar 2.1.x.

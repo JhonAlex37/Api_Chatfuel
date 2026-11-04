@@ -23,7 +23,7 @@ const SLOTS = [
 
 function fixture({ initial = {}, bookingError = null, invalidBooking = false,
   human = false, live = true, failLead = false, latestText = 'Sí, quiero agendar una llamada',
-  naturalStatus = 'closed', botReplied = true, staleHandoffIndex = false, previousReply = '', olderMessages = [] } = {}) {
+  naturalStatus = 'closed', botReplied = true, staleHandoffIndex = false, previousReply = '', olderMessages = [], availabilitySlots = SLOTS } = {}) {
   const fields = { nombre_completo: 'Persona de Prueba', ciudad_municipio: 'Bogotá',
     obligacion_vivienda_activa: 'si', ...initial };
   const calls = [];
@@ -64,7 +64,7 @@ function fixture({ initial = {}, bookingError = null, invalidBooking = false,
     if (url.endsWith('/prospecting-bot/lead')) return Response.json({ ok: !failLead, persisted: !failLead, clientId: failLead ? null : 'CLI-MOCK-ONLY' });
     if (url.endsWith('/leads/resolve')) return Response.json({ ok: true, data: { clientCode: 'CLI-MOCK-ONLY', advisorAssigned: true, created: false } });
     if (url.endsWith('/availability')) return Response.json({ ok: true, data: {
-      source: 'bitrix_accessibility', slots: SLOTS.filter(s => !payload.excludeStarts.includes(s.startAt)),
+      source: 'bitrix_accessibility', slots: availabilitySlots.filter(s => !payload.excludeStarts.includes(s.startAt)),
     } });
     if (url.endsWith('/appointments')) {
       if (bookingError === 'conflict' && !failed) {
@@ -481,5 +481,45 @@ test('contextual consent still waits for the current assistant reply and leaves 
     const f = fixture({ initial: { 'last user freeform input': 'si' }, latestText: 'si', previousReply: '¿Quiere que organicemos una llamada con un asesor?', ...config });
     await f.handle.synchronizeHandoffs();
     assert.equal(f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow')).length, 0);
+  }
+});
+
+
+function localFreeSlot(time, advisorId = 'advisor-one') {
+  const startAt = `2026-11-04T${time}:00-05:00`;
+  return { startAt, endAt: new Date(Date.parse(startAt) + 600_000).toISOString(), advisorId };
+}
+
+test('la agenda reparte las opciones entre el inicio, la mitad y el final de la franja libre', async () => {
+  const availabilitySlots = Array.from({ length: 21 }, (_, index) => {
+    const minutes = 8 * 60 + 30 + index * 10;
+    return localFreeSlot(`${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`);
+  });
+  const f = fixture({ availabilitySlots });
+  const response = await prepareOptions(f);
+  const slots = JSON.parse(Buffer.from(response.state.split('.')[0], 'base64url')).slots;
+  assert.deepEqual(slots.map(slot => slot.startAt), ['08:30', '10:10', '11:50'].map(time => localFreeSlot(time).startAt));
+  assert.equal(f.bookings().length, 0);
+});
+
+test('solo ofrece huecos realmente libres y no duplica horas de distintos asesores', async () => {
+  const availabilitySlots = ['08:30', '08:40', '10:40', '11:20'].map(time => localFreeSlot(time));
+  availabilitySlots.push(localFreeSlot('10:40', 'advisor-two'));
+  const f = fixture({ availabilitySlots });
+  const response = await prepareOptions(f);
+  const slots = JSON.parse(Buffer.from(response.state.split('.')[0], 'base64url')).slots;
+  assert.deepEqual(slots.map(slot => slot.startAt), ['08:30', '10:40', '11:20'].map(time => localFreeSlot(time).startAt));
+  assert.ok(slots.every(slot => availabilitySlots.some(free => free.startAt === slot.startAt && free.advisorId === slot.advisorId)));
+  assert.equal(new Set(slots.map(slot => Date.parse(slot.startAt))).size, slots.length);
+  assert.equal(f.bookings().length, 0);
+});
+
+test('con pocos huecos devuelve menos opciones antes que horas consecutivas', async () => {
+  for (const [times, expected] of [[['08:30', '08:40', '08:50'], ['08:30', '08:50']], [['08:30', '08:40'], ['08:30']]]) {
+    const f = fixture({ availabilitySlots: times.map(time => localFreeSlot(time)) });
+    const response = await prepareOptions(f);
+    const slots = JSON.parse(Buffer.from(response.state.split('.')[0], 'base64url')).slots;
+    assert.deepEqual(slots.map(slot => slot.startAt), expected.map(time => localFreeSlot(time).startAt));
+    assert.equal(f.bookings().length, 0);
   }
 });

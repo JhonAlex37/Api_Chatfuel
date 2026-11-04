@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual, createHash } from 'node:crypto';
 
-export const RELEASE_VERSION = '2.1.19';
+export const RELEASE_VERSION = '1.0.1';
 
 const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa',
   'tipo_obligacion', 'banco_entidad', 'estado_pago', 'necesidad_principal',
@@ -106,6 +106,22 @@ function offersBooking(value) {
   if (!/[¿?]/.test(text) || /\b(?:no|nunca)\b[^?!.]{0,70}\b(?:agend|coordin|organiz|program|reserv)/.test(text)) return false;
   return /\b(?:quiere|quieres|desea|deseas|le gustaria|te gustaria|podemos)\b[^?!.]{0,100}\b(?:agendar|coordinar|organizar|organicemos|agendemos|coordinemos|programar|reservar)\b[^?!.]{0,80}\b(?:llamada|cita)\b/.test(text)
     || /\b(?:agendamos|coordinamos|organizamos|programamos|le agendo|te agendo)\b[^?!.]{0,80}\b(?:llamada|cita)\b/.test(text);
+}
+// Ofrece solo inicios libres verificados, repartidos a lo largo de la franja.
+// Deja al menos un intervalo de diez minutos entre las opciones ofrecidas.
+function spreadSlots(slots) {
+  const unique = [...new Map(slots.map(slot => [Date.parse(slot.startAt), slot])).values()]
+    .sort((left, right) => Date.parse(left.startAt) - Date.parse(right.startAt));
+  if (!unique.length) return [];
+  const first = unique[0], last = unique.at(-1);
+  const start = Date.parse(first.startAt), end = Date.parse(last.startAt);
+  const separation = 20 * 60_000;
+  if (end - start < separation) return [first];
+  const midpoint = (start + end) / 2;
+  const middle = unique.slice(1, -1)
+    .filter(slot => Date.parse(slot.startAt) - start >= separation && end - Date.parse(slot.startAt) >= separation)
+    .sort((left, right) => Math.abs(Date.parse(left.startAt) - midpoint) - Math.abs(Date.parse(right.startAt) - midpoint))[0];
+  return middle ? [first, middle, last] : [first, last];
 }
 const PERIODS = [{ label: 'En la mañana', fromTime: '08:30', toTime: '12:00' },
   { label: 'En la tarde', fromTime: '12:00', toTime: '17:00' }];
@@ -262,7 +278,7 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
   }
   async function offerTimes(contactId, state, date, excluded = []) {
     const window = { fromTime: state.fromTime || '08:30', toTime: state.toTime || '17:00' };
-    const slots = (await available(state.clientCode, date, date, window, excluded)).slice(0, 3)
+    const slots = spreadSlots(await available(state.clientCode, date, date, window, excluded))
       .map(({ startAt, endAt, advisorId }) => ({ startAt, endAt, advisorId }));
     const context = { ...state, ...window, step: 'choose', date, slots,
       excludedStarts: [...new Set([...excluded, ...slots.map(slot => slot.startAt)])] };
