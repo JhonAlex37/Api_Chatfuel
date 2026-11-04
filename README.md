@@ -36,16 +36,16 @@ docs/RAILWAY.md                   Configuración del servicio independiente
 
 ## Ejecutar las pruebas
 
-Requiere Node.js 24 o superior. El conector usa las API incluidas del runtime;
-las pruebas se ejecutan directamente, sin instalar dependencias externas.
+Requiere Node.js 24 o superior. La API usa Node.js 24 y mysql2. Instalar las dependencias con `npm ci` antes
+de ejecutar las pruebas. Los registros y reservas de las pruebas usan simuladores.
 
 ```powershell
 npm run check
 npm test
 ```
 
-Para ejecutar el servidor local con Bun, copiar `.env.example` a `.env`,
-completar las variables y ejecutar `bun run start`. Con Docker, construir
+Para ejecutar la API local, copiar `.env.example` a `.env`, completar las
+variables y ejecutar `npm start`. MySQL debe estar disponible por su URL. Con Docker, construir
 `docker build -t api-chatfuel .` y ejecutar
 `docker run --rm --env-file .env -p 3000:3000 api-chatfuel`.
 Las variables completas son necesarias para que `/health` devuelva 200.
@@ -113,3 +113,16 @@ una nueva revisión y verificar la reserva real en Bitrix.
 La agenda reparte hasta tres opciones entre el inicio, la mitad y el final
 de la disponibilidad verificada. Si hay pocos huecos, muestra menos opciones
 para evitar horas consecutivas. Ver [docs/HORARIOS.md](docs/HORARIOS.md).
+
+
+## Una API y una base MySQL separada
+
+El servicio `Api_Chatfuel` expone tanto `/registrar-cliente?id=...` como
+`/booking`, `/sync-handoffs` y `/health`. El código del registro de clientes
+se integró desde `Proyecta-SAS/Api_Chatfuel` conservando sus consultas a Bitrix,
+su token opcional y la tabla `clientes`. No envía WhatsApp por registrar una fila.
+El servicio `MySQL` conserva los datos y permanece aparte.
+
+El servidor HTTP de Node entrega las rutas de agenda al mismo conector que
+ya validaba disponibilidad, consentimiento e idempotencia. No necesita una
+segunda API. `/health` comprueba MySQL y la configuración de la agenda.

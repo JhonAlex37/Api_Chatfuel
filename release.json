@@ -1,14 +1,14 @@
 {
   "version": "1.0.1",
   "component": "api-chatfuel",
-  "connector_sha256": "653ce5aa49f3c441520f580302d73e6d30ae46974b19a17e866b1610d2fe5fe4",
+  "connector_sha256": "34a8b59f5bcf359839cf49c5d3fed3361e98d6dc915c50131ae173f1b6fedafd",
   "source_repository": "https://github.com/JhonAlex37/Api_Chatfuel",
   "extracted_from_commit": "bcd5a9693326ae590b1602ad89a3fa2703608991",
-  "tests_expected": 39,
+  "tests_expected": 51,
   "migration_status": "independent_service_active",
   "production_booking_verified": false,
   "new_scoring_implemented": false,
-  "tests_passed": 39,
+  "tests_passed": 50,
   "docker_image_built": true,
   "github_write_access": true,
   "github_observed_login": "JhonAlex37",
@@ -18,5 +18,9 @@
   "deployment_url": "https://apichatfuel-production.up.railway.app",
   "old_handoff_listener_enabled": false,
   "new_handoff_listener_enabled": true,
-  "chatfuel_configuration_version": "rch-questions-v6-2026-11-04"
+  "chatfuel_configuration_version": "rch-questions-v6-2026-11-04",
+  "runtime": "node24",
+  "mysql_registration_integrated": true,
+  "tests_skipped": 1,
+  "mysql_real_unit_test_executed": false
 }

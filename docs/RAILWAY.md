@@ -2,7 +2,7 @@
 
 ## Servicio activo
 
-- Proyecto: `perceptive-love`, ID `a8744968-739a-441f-ab07-eca9488a3830`.
+- Proyecto: `Api Chatfuel`, ID `a8744968-739a-441f-ab07-eca9488a3830`.
 - Servicio: `Api_Chatfuel`, ID `b15812dd-8735-45f3-9e31-086c4862c50b`.
 - Entorno: `production`, ID `ac461721-7ee3-4600-9ed6-126a2d8b0d0a`.
 - Origen GitHub: `JhonAlex37/Api_Chatfuel`, rama `main`.
@@ -11,9 +11,9 @@
 
 ## Construcción y despliegue
 
-Railway detecta el Dockerfile de la raíz y ejecuta Bun. El conector lee `PORT`
-y las nueve variables descritas en README.md. Las credenciales están en las
-variables del servicio independiente, resueltas sin referencias a otro proyecto.
+Railway detecta el Dockerfile de la raíz y ejecuta Node.js 24. El conector lee `PORT`
+y las nueve variables descritas en README.md. Las credenciales de agenda están en el servicio de API. MYSQL_URL conserva
+la conexión al servicio MySQL del mismo proyecto, que permanece separado.
 
 La configuración de despliegue está en el propio servicio de Railway:
 
@@ -37,3 +37,9 @@ La prueba real debe comprobar las preguntas, la negociación y comentario en
 30X y, con confirmación del cliente, el evento en el calendario de Bitrix.
 El scoring nuevo de 0 a 100 sigue pendiente; el scoring original de DalIA
 conserva su configuración.
+
+La API unificada arranca `src/server.js` y conserva `/registrar-cliente`.
+Las rutas `/booking` y `/sync-handoffs` llegan al mismo conector de agenda.
+El servicio API necesita además MYSQL_URL, BITRIX_WEBHOOK_URL y el token
+opcional REGISTRAR_CLIENTE_TOKEN que ya usaba el registro. No registrar un
+cliente ni completar una fila de MySQL implica iniciar mensajes en WhatsApp.

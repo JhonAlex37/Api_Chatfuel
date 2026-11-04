@@ -595,7 +595,7 @@ export function startHandoffListener(handler, { env = process.env, WebSocketImpl
   };
 }
 
-if (globalThis.Bun) {
+if (globalThis.Bun && import.meta.main) {
   const handler = createHandler({ env: Bun.env });
   Bun.serve({ port: Number(Bun.env.PORT || 3000), fetch: handler });
   if (Bun.env.HANDOFF_SYNC_ENABLED === 'true') startHandoffListener(handler, { env: Bun.env });

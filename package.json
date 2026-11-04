@@ -8,13 +8,17 @@
     "node": ">=24"
   },
   "scripts": {
-    "start": "bun src/connector.mjs",
-    "check": "node --check src/connector.mjs",
-    "test": "node --test test/connector.test.mjs"
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "check": "node --check src/connector.mjs && node --check src/app.js && node --check src/server.js",
+    "test": "node --test",
+    "db:init": "node --env-file-if-exists=.env scripts/init-db.js"
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/JhonAlex37/Api_Chatfuel.git"
   },
-  "author": "JhonAlex37"
+  "author": "JhonAlex37",
+  "dependencies": {
+    "mysql2": "^3.15.0"
+  }
 }

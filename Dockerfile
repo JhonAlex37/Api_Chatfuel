@@ -1,9 +1,12 @@
-FROM oven/bun:1
+FROM node:24-alpine
 WORKDIR /app
-COPY --chown=bun:bun package.json ./
-COPY --chown=bun:bun src ./src
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY --chown=node:node src ./src
+COPY --chown=node:node sql ./sql
+COPY --chown=node:node scripts ./scripts
 ENV NODE_ENV=production
 ENV PORT=3000
-USER bun
+USER node
 EXPOSE 3000
-CMD ["bun", "src/connector.mjs"]
+CMD ["node", "src/server.js"]

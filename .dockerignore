@@ -1,5 +1,10 @@
 **
 !Dockerfile
 !package.json
+!package-lock.json
 !src/
 !src/**
+!sql/
+!sql/**
+!scripts/
+!scripts/**

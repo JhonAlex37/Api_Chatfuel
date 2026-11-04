@@ -38,3 +38,10 @@ La separación del despliegue no activa el scoring nuevo de Chatfuel ni divide
 automáticamente los números de WhatsApp. La reserva completa con una conversación
 real sigue siendo una prueba funcional pendiente. Algunos nombres de atributos
 se conservan por compatibilidad con el contrato de 30X y conversaciones existentes.
+
+## Integración de la API de registro
+
+Se integró el código de registro MySQL publicado en Proyecta-SAS/Api_Chatfuel
+a la API personal de Chatfuel. En Railway se utiliza el mismo servicio
+Api_Chatfuel y su dominio; MySQL permanece como servicio aparte. No se
+requiere otro servicio de agenda ni cambiar las URLs del flujo de Chatfuel.
