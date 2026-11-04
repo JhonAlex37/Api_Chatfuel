@@ -1,0 +1,15 @@
+{
+  "version": "2.1.17",
+  "component": "api-chatfuel",
+  "connector_sha256": "b9d86c4a6531a1daede525f46d9413f298523f8ccfc4f270576edda31be29ece",
+  "source_repository": "https://github.com/Proyecta-SAS/Api_Chatfuel",
+  "extracted_from_commit": "bcd5a9693326ae590b1602ad89a3fa2703608991",
+  "tests_expected": 31,
+  "migration_status": "prepared_locally",
+  "production_booking_verified": false,
+  "new_scoring_implemented": false,
+  "tests_passed": 31,
+  "docker_image_built": true,
+  "github_write_access": false,
+  "github_observed_login": "JhonAlex37"
+}

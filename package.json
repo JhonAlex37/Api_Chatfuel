@@ -1,0 +1,15 @@
+{
+  "name": "api-chatfuel",
+  "version": "2.1.17",
+  "private": true,
+  "type": "module",
+  "description": "Integración independiente de Chatfuel con 30X y agenda Bitrix para RCH.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "bun src/connector.mjs",
+    "check": "node --check src/connector.mjs",
+    "test": "node --test test/connector.test.mjs"
+  }
+}

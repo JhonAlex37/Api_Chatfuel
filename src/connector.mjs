@@ -1,0 +1,572 @@
+import { createHmac, timingSafeEqual, createHash } from 'node:crypto';
+
+export const RELEASE_VERSION = '2.1.17';
+
+const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa',
+  'tipo_obligacion', 'banco_entidad', 'estado_pago', 'necesidad_principal',
+  'correo_contacto', 'anos_restantes', 'anos_pagados', 'numero_titulares',
+  'puede_aumentar_cuota_mas_10', 'modalidad_pesos_uvr',
+  'linea_interes', 'urgencia_caso', 'horario_contacto_preferido',
+  'senal_reducir_plazo', 'senal_reducir_intereses', 'senal_deuda_aumenta',
+  'senal_conoce_ley_vivienda', 'senal_consulta_honorarios', 'senal_info_adicional',
+  'rch_banco', 'rch_frech', 'rch_saldo_millones', 'rch_saldo_evidencia',
+  'rch_anos_pagando', 'rch_cuotas_atrasadas',
+  'bitrix_agenda_estado', 'bitrix_agenda_respuesta', 'crm_30x_codigo', 'bitrix_reserva_pendiente',
+  'crm_30x_handoff_hash', 'crm_30x_profile_comment_hash', 'last user freeform input',
+  'solicitud_agendamiento', 'texto_solicitud_agendamiento', 'crm_30x_booking_intent_hash'];
+const PROFILE = ATTR.filter(name => !name.startsWith('bitrix_') && !name.startsWith('crm_')
+  && !['solicitud_agendamiento', 'texto_solicitud_agendamiento'].includes(name));
+const attributeMap = attributes => Object.fromEntries((attributes ?? []).map(({ attr, value }) =>
+  [attr.name, value?.stringValue ?? value?.booleanValue ?? value?.doubleValue ?? '']));
+const normalize = value => String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+const same = (a, b) => {
+  const left = Buffer.from(a), right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+};
+const yes = value => /^(si|s|1|true|activo|activa|confirmo|confirmar|de acuerdo|si confirmo)[.!\s]*$/.test(normalize(value));
+const no = value => /^(no|n|0|false|cancelar|cancela|salir)[.!\s]*$/.test(normalize(value));
+const profileText = value => {
+  if (value === undefined || value === null) return null;
+  const text = String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 800);
+  return !text || /^(?:pendiente|unknown|desconocid[oa]|no (?:sabe|recuerda|informad[oa])|sin (?:dato|informaci[oó]n)|declin[oó]|prefiere no responder|null|undefined|n\/a)$/i.test(text) ? null : text;
+};
+const declared = (fields, ...names) => names.map(name => profileText(fields[name])).find(value => value !== null) ?? null;
+
+export function profileComment(fields, { handoff = false, displayName = '' } = {}) {
+  const details = [];
+  const pending = [];
+  const name = declared(fields, 'nombre_completo');
+  const city = declared(fields, 'ciudad_municipio');
+  if (name) details.push(`Chatfuel conversó con ${name}${city ? `, de ${city},` : ''} a través de WhatsApp.`);
+  else {
+    details.push(`Perfilamiento RCH recibido por Chatfuel${profileText(displayName) ? `; contacto de WhatsApp: ${profileText(displayName)}` : ''}.`);
+    pending.push('nombre completo confirmado');
+    if (city) details.push(`El cliente se encuentra en ${city}.`);
+  }
+  if (!city) pending.push('ciudad o municipio');
+  const active = declared(fields, 'obligacion_vivienda_activa');
+  if (yes(active)) details.push(`Confirma una obligación de vivienda activa${declared(fields, 'tipo_obligacion') ? ` de tipo ${declared(fields, 'tipo_obligacion')}` : ''}.`);
+  else if (no(active)) details.push('Indica que no tiene una obligación de vivienda activa.');
+  else pending.push('confirmación de obligación de vivienda activa');
+  const bank = declared(fields, 'rch_banco', 'banco_entidad');
+  if (bank) details.push(`Entidad del crédito: ${bank}.`);
+  else pending.push('banco o entidad');
+  const coverage = declared(fields, 'rch_frech');
+  if (yes(coverage)) details.push('Declara tener cobertura de tasa Mi Casa Ya o FRECH.');
+  else if (no(coverage)) details.push('Declara no tener cobertura de tasa Mi Casa Ya o FRECH.');
+  else pending.push('cobertura de tasa Mi Casa Ya o FRECH');
+  const balance = declared(fields, 'rch_saldo_millones');
+  const balanceEvidence = declared(fields, 'rch_saldo_evidencia');
+  if (balance && /^\d+(?:[.,]\d+)?$/.test(balance)) {
+    const amount = Number(balance.replace(',', '.')) * 1_000_000;
+    if (Number.isFinite(amount) && amount <= Number.MAX_SAFE_INTEGER) {
+      details.push(`Saldo pendiente de dinero declarado: ${new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 2 }).format(amount)} COP.`);
+    } else pending.push('saldo pendiente en dinero por aclarar');
+  } else if (balanceEvidence) {
+    details.push(`Referencia del cliente sobre el saldo pendiente: «${balanceEvidence}».`);
+    pending.push('saldo pendiente en dinero por confirmar');
+  } else if (balance) {
+    details.push(`Saldo pendiente declarado en millones de pesos colombianos: ${balance}.`);
+  } else pending.push('saldo pendiente en dinero');
+  const elapsed = declared(fields, 'rch_anos_pagando', 'anos_pagados');
+  if (elapsed) details.push(`Tiempo que lleva pagando, en años: ${elapsed}.`);
+  else pending.push('tiempo que lleva pagando');
+  const arrears = declared(fields, 'rch_cuotas_atrasadas');
+  if (arrears !== null && /^\d+$/.test(arrears)) {
+    const count = Number(arrears);
+    details.push(count === 0 ? 'Confirma estar al día, con cero cuotas vencidas sin pagar.' : `Cuotas vencidas sin pagar declaradas: ${count}.`);
+  } else if (arrears !== null) details.push(`Cuotas atrasadas según lo declarado: ${arrears}.`);
+  else {
+    const paymentStatus = declared(fields, 'estado_pago');
+    if (paymentStatus) details.push(`Estado de pago declarado: ${paymentStatus}.`);
+    if (!paymentStatus || !/^(?:al dia|current)$/i.test(normalize(paymentStatus))) pending.push('número de cuotas vencidas sin pagar');
+  }
+  for (const [field, label] of [['necesidad_principal', 'Objetivo declarado'], ['urgencia_caso', 'Urgencia registrada'],
+    ['horario_contacto_preferido', 'Preferencia de contacto']]) {
+    const value = declared(fields, field);
+    if (value) details.push(`${label}: ${value}.`);
+  }
+  const followUp = [handoff
+    ? 'Motivo de atención: transferencia al equipo humano desde Chatfuel. Revisar el contexto y los datos pendientes antes de orientar el caso.'
+    : 'Motivo de atención: solicitud de agendamiento RCH. La cita está pendiente de confirmación técnica en Bitrix.'];
+  if (pending.length) followUp.push(`Datos pendientes: ${pending.join('; ')}.`);
+  followUp.push('Scoring nuevo de Chatfuel pendiente de implementación; no se asigna puntaje ni clasificación desde este comentario.');
+  return `${details.join(' ')}\n\n${followUp.join(' ')}`;
+}
+const declineBooking = value => no(value) || /^(no gracias|ahora no|por ahora no|mas tarde|despues|prefiero no|no quiero agendar|no me agendes|dejalo pendiente|lo dejamos pendiente)[.!\s]*$/.test(normalize(value));
+function explicitBooking(value) {
+  const text = normalize(value);
+  if (/\b(?:no|nunca)\b.*\b(?:agend|reserv|program)/.test(text)) return false;
+  return /\b(?:quiero|quisiera|necesito|deseo|me gustaria|puedo|podemos|puedes)\s+(?:que me\s+)?(?:agendar(?:me)?|agendes|reservar(?:me)?|reserves|programar(?:me)?)/.test(text)
+    || /^(?:agendar(?:me)?|agendame|reservar(?:me)?|reservame)(?:\s+(?:una|la|mi))?(?:\s+(?:cita|llamada|horario|espacio))?[.!]*$/.test(text);
+}
+const confirmBooking = value => yes(value) || /^(claro(?: que si)?|dale|vale|listo|perfecto|por supuesto|esta bien|si por favor|confirmado)[.!\s]*$/.test(normalize(value));
+const PERIODS = [{ label: 'En la mañana', fromTime: '08:30', toTime: '12:00' },
+  { label: 'En la tarde', fromTime: '12:00', toTime: '17:00' }];
+const dateAt = value => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value));
+const timeAt = value => new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(value));
+const addDays = (date, count) => new Date(Date.parse(`${date}T12:00:00Z`) + count * 86_400_000).toISOString().slice(0, 10);
+const dayLabel = date => new Intl.DateTimeFormat('es-CO', { timeZone: 'America/Bogota', weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(`${date}T12:00:00Z`));
+function selection(value, count) {
+  if (/[?¿]/.test(value)) return null;
+  const text = normalize(value).replace(/[!¡.,;:]/g, ' ').replace(/\s+/g, ' ').trim();
+  const match = text.match(/^(?:(?:si|claro|ok|listo|perfecto|vale)\s+)?(?:(?:yo\s+)?(?:elijo|escojo|selecciono|prefiero|confirmo|acepto|quiero|reservame|agendame|me sirve|me quedo con|me gustaria|me queda bien)\s+)?(?:la\s+|el\s+)?(?:opcion\s+|horario\s+|alternativa\s+)?(?:numero\s+)?([1-5]|uno|una|primera|primero|dos|segunda|segundo|tres|tercera|tercero)(?:\s+(?:opcion|horario|alternativa))?(?:\s+(?:me sirve|me queda bien|esta bien|me interesa))?(?:\s+por favor)?(?:\s+gracias)?$/);
+  if (!match) return null;
+  const number = /^\d$/.test(match[1]) ? Number(match[1]) : ({ uno: 1, una: 1, primera: 1, primero: 1, dos: 2, segunda: 2, segundo: 2, tres: 3, tercera: 3, tercero: 3 })[match[1]];
+  return number >= 1 && number <= count ? number - 1 : null;
+}
+function periodFrom(value) {
+  const text = normalize(value);
+  if (/\b(no|nunca|tal vez|depende|solo si)\b/.test(text)) return null;
+  if (/(?:en|por) la tarde\b|^tarde$/.test(text)) return PERIODS[1];
+  if (/(?:en|por) la manana\b|^manana$/.test(text)) return PERIODS[0];
+  return null;
+}
+function selectedDay(value, days, now) {
+  const index = selection(value, days.length);
+  if (index !== null) return days[index];
+  const text = normalize(value).replace(/[.!]/g, '').replace(/^(?:para|prefiero|quiero|me gustaria)\s+/, '').replace(/^el\s+/, '').replace(/\s+(?:en|por) la (?:manana|tarde)$/, '').trim();
+  const relative = { hoy: 0, manana: 1, 'pasado manana': 2 };
+  if (Object.hasOwn(relative, text)) {
+    const date = addDays(dateAt(now), relative[text]);
+    return days.includes(date) ? date : null;
+  }
+  const matches = days.filter(date => [normalize(dayLabel(date)), normalize(new Intl.DateTimeFormat('es-CO', { timeZone: 'America/Bogota', weekday: 'long' }).format(new Date(`${date}T12:00:00Z`))), date].includes(text));
+  return matches.length === 1 ? matches[0] : null;
+}
+const json = (data, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
+
+export function createHandler({ env = process.env, fetchImpl = fetch, now = () => Date.now() } = {}) {
+  const botID = env.CHATFUEL_BOT_ID;
+  const secret = env.CHATFUEL_BOOKING_SECRET;
+  const crmBase = env.AI_FIRST_ONE_BASE_URL;
+  const configured = Boolean(botID && secret?.length >= 32 && env.CHATFUEL_API_TOKEN
+    && crmBase?.startsWith('https://') && env.AI_FIRST_ONE_APPOINTMENTS_TOKEN);
+  const handoffStatus = { enabled: env.HANDOFF_SYNC_ENABLED === 'true', connected: false,
+    lastSyncAt: null, synchronized: 0, bookingFlowsStarted: 0, lastError: null };
+  let syncing = null;
+  // Contact search can briefly return an old attribute snapshot after a write.
+  // Keep successful writes locally too, and use a separate schema marker so an
+  // older deployment cannot alternate its legacy fingerprint with this one.
+  const synchronizedProfiles = new Map();
+  const mac = data => createHmac('sha256', secret).update(data).digest('base64url');
+  function encode(contactId, state) {
+    const payload = Buffer.from(JSON.stringify({ ...state, contactId, expires: now() + 30 * 60_000 })).toString('base64url');
+    return `${payload}.${mac(payload)}`;
+  }
+  function decode(token, contactId) {
+    if (!token || token.length > 20000) return null;
+    const [payload, signature, extra] = token.split('.');
+    if (extra || !payload || !signature || !same(signature, mac(payload))) return null;
+    try {
+      const state = JSON.parse(Buffer.from(payload, 'base64url').toString());
+      return state.contactId === contactId && state.expires > now() ? state : null;
+    } catch { return null; }
+  }
+  async function graphql(query, variables) {
+    const response = await fetchImpl('https://panel.chatfuel.com/graphql', {
+      method: 'POST', signal: AbortSignal.timeout(10_000),
+      headers: { Authorization: `Bearer ${env.CHATFUEL_API_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables }),
+    });
+    const body = await response.json();
+    if (!response.ok || body.errors?.length || !body.data) throw new Error('CHATFUEL_UNAVAILABLE');
+    return body.data;
+  }
+  async function setAttributes(contactId, fields) {
+    const entries = Object.entries(fields).filter(([, value]) => value !== undefined && value !== null);
+    const variables = { id: contactId };
+    const declarations = ['$id:ContactID!'];
+    const operations = entries.map(([name, value], index) => {
+      declarations.push(`$v${index}:String!`);
+      variables[`v${index}`] = String(value);
+      return `a${index}:contactAttributeUpdate(id:$id,attrName:${JSON.stringify(name)},attrValue:$v${index}){id}`;
+    });
+    await graphql(`mutation BookingAttributes(${declarations.join(',')}){${operations.join(' ')}}`, variables);
+  }
+  async function contact(contactId) {
+    const data = await graphql(`query BookingContact($botID:BotID!,$id:ContactID!,$names:[AttributeName!]){
+      bot(id:$botID){contact(id:$id){id attributes(names:$names){attr{name} value{
+        ... on BotAttributeValueString{stringValue} ... on BotAttributeValueBoolean{booleanValue}
+        ... on BotAttributeValueDouble{doubleValue}}} ... on WhatsappContact{phone}}}}`,
+    { botID, id: contactId, names: ATTR });
+    const item = data.bot.contact;
+    const fields = attributeMap(item.attributes);
+    const phone = String(item.phone ?? '').replace(/\D/g, '');
+    if (!/^\d{8,15}$/.test(phone)) throw new Error('INVALID_CONTACT');
+    return { phone, fields };
+  }
+  async function crm(path, body, idempotencyKey) {
+    const response = await fetchImpl(`${crmBase.replace(/\/$/, '')}${path}`, {
+      method: 'POST', signal: AbortSignal.timeout(15_000),
+      headers: { Authorization: `Bearer ${env.AI_FIRST_ONE_APPOINTMENTS_TOKEN}`, 'Content-Type': 'application/json',
+        ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
+      body: JSON.stringify(body),
+    });
+    const result = await response.json();
+    if (!response.ok || result.ok !== true) {
+      const error = new Error(response.status === 409 && result.error?.code === 'SLOT_UNAVAILABLE' ? 'SLOT_UNAVAILABLE' : 'CRM_UNAVAILABLE');
+      throw error;
+    }
+    return result;
+  }
+  async function reply(contactId, state, message, { done = false, fields = {}, human = false } = {}) {
+    const signed = encode(contactId, state);
+    await setAttributes(contactId, { ...fields, bitrix_agenda_estado: signed,
+      bitrix_agenda_mensaje: message, bitrix_agenda_finalizada: done ? 'si' : 'no', bitrix_agenda_humano: human ? 'si' : 'no' });
+    return json({ message, done: done ? 'si' : 'no', human: human ? 'si' : 'no', state: signed, clientCode: state.clientCode ?? '' });
+  }
+  function label(slot) {
+    return new Intl.DateTimeFormat('es-CO', { timeZone: 'America/Bogota', weekday: 'long',
+      day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' }).format(new Date(slot.startAt));
+  }
+  async function available(clientCode, from, to, window, excluded = []) {
+    const result = await crm(`/api/v1/leads/${encodeURIComponent(clientCode)}/availability`, {
+      advisorPool: true, mode: 'next_days', durationMinutes: 10, quantity: 2,
+      dateFrom: from, dateTo: to, daysAhead: 21, fromTime: window.fromTime, toTime: window.toTime,
+      weekdays: ['lunes', 'martes', 'miercoles', 'jueves', 'viernes'],
+      excludeStarts: excluded.slice(-500),
+    });
+    const raw = result.data?.slots;
+    if (!Array.isArray(raw) || result.data.source !== 'bitrix_accessibility') throw new Error('INVALID_AVAILABILITY');
+    return raw.filter(slot => {
+      const start = Date.parse(slot.startAt), end = Date.parse(slot.endAt);
+      if (!(start > now()) || end - start !== 600_000 || !slot.advisorId) return false;
+      const date = dateAt(start);
+      const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
+      return weekday !== 0 && weekday !== 6 && date >= from && date <= to
+        && dateAt(end) === date && timeAt(start) >= window.fromTime && timeAt(end) <= window.toTime
+        && !excluded.some(value => Date.parse(value) === start);
+    }).sort((a, b) => Date.parse(a.startAt) - Date.parse(b.startAt));
+  }
+  function askPeriod(contactId, clientCode, { date, intro = '' } = {}) {
+    return reply(contactId, { step: 'period', clientCode, ...(date ? { date } : {}) },
+      `${intro ? intro + '\n\n' : 'Vamos a coordinar una llamada de 10 minutos con el asesor.\n\n'}${date ? `Para el ${dayLabel(date)}, ¿prefieres` : '¿Prefieres'} el contacto en la mañana o en la tarde?`);
+  }
+  async function offerDays(contactId, clientCode, window) {
+    let from = dateAt(now());
+    const cutoff = Number(env.APPOINTMENT_SAME_DAY_CUTOFF_HOUR || 12);
+    if (Number(timeAt(now()).slice(0, 2)) >= (Number.isInteger(cutoff) && cutoff >= 0 && cutoff <= 23 ? cutoff : 12)) from = addDays(from, 1);
+    while ([0, 6].includes(new Date(`${from}T12:00:00Z`).getUTCDay())) from = addDays(from, 1);
+    const slots = await available(clientCode, from, addDays(from, 21), window);
+    const days = [...new Set(slots.map(slot => dateAt(slot.startAt)))].slice(0, 2);
+    if (!days.length) return askPeriod(contactId, clientCode, { intro: 'No encontré días libres en esa franja. Podemos revisar la otra franja o solicitar ayuda a un asesor.' });
+    return reply(contactId, { step: 'day', clientCode, days, ...window },
+      `¿Qué día prefieres para el contacto con un asesor?\n\n${days.map((date, index) => `${index + 1}. ${dayLabel(date)}`).join('\n')}\n\nPuedes responder con el día o con el número.`);
+  }
+  async function offerTimes(contactId, state, date, excluded = []) {
+    const window = { fromTime: state.fromTime || '08:30', toTime: state.toTime || '17:00' };
+    const slots = (await available(state.clientCode, date, date, window, excluded)).slice(0, 3)
+      .map(({ startAt, endAt, advisorId }) => ({ startAt, endAt, advisorId }));
+    const context = { ...state, ...window, step: 'choose', date, slots,
+      excludedStarts: [...new Set([...excluded, ...slots.map(slot => slot.startAt)])] };
+    if (!slots.length) return reply(contactId, context, 'No encontré otros horarios libres en ese día y franja. ¿Prefieres otro día u otra franja?');
+    return reply(contactId, context,
+      `Estos son los horarios libres para el ${dayLabel(date)} (hora de Colombia):\n\n${slots.map((slot, index) => `${index + 1}. ${timeAt(slot.startAt)}`).join('\n')}\n\n¿Cuál te sirve? Puedes decir el horario, «la primera» o el número. También podemos revisar otro día u otra franja.`);
+  }
+  async function options(contactId, clientCode, excluded = [], context = {}) {
+    if (context.date) return offerTimes(contactId, { ...context, clientCode }, context.date, excluded);
+    return askPeriod(contactId, clientCode);
+  }
+  async function upsertLead(contactId, phone, fields, { handoff = false, displayName = '' } = {}) {
+    let clientCode = fields.crm_30x_codigo;
+    if (!clientCode) {
+      const resolved = await crm('/api/v1/leads/resolve', { phone });
+      if (!resolved.data?.clientCode || resolved.data.advisorAssigned !== true) throw new Error('ADVISOR_NOT_ASSIGNED');
+      clientCode = String(resolved.data.clientCode);
+    }
+    const lead = await crm('/api/webhooks/prospecting-bot/lead', {
+      phone, contactName: fields.nombre_completo || displayName || 'Contacto WhatsApp',
+      ...(fields.ciudad_municipio ? { city: fields.ciudad_municipio } : {}),
+      externalLeadId: clientCode,
+      externalConversationId: contactId, source: 'whatsapp',
+      status: handoff ? 'requiere_asesor' : 'perfilamiento_iniciado',
+      ...(fields.correo_contacto ? { email: fields.correo_contacto } : {}),
+      summary: profileComment(fields, { handoff, displayName }),
+      ...(handoff && fields['last user freeform input'] ? { lastMessage: String(fields['last user freeform input']).slice(0, 2000) } : {}),
+      answers: { ...Object.fromEntries(PROFILE.filter(name => name !== 'last user freeform input')
+        .map(name => [name, fields[name] ?? null])),
+        ciudad: fields.ciudad_municipio || null,
+        tieneCreditoHipotecario: yes(fields.obligacion_vivienda_activa) ? true : no(fields.obligacion_vivienda_activa) ? false : null,
+        banco: declared(fields, 'rch_banco', 'banco_entidad'), estadoPago: fields.estado_pago || null,
+        necesidadPrincipal: fields.necesidad_principal || null,
+        lineaInteres: fields.linea_interes || 'RCH', solicitudAsesor: handoff,
+        nombreConfirmado: Boolean(fields.nombre_completo) },
+    });
+    if (lead.persisted !== true || !lead.clientId) throw new Error('LEAD_NOT_PERSISTED');
+    return String(lead.clientId);
+  }
+  async function synchronizeHandoffs() {
+    if (syncing) return syncing;
+    syncing = (async () => {
+      let after = null;
+      let synchronized = 0;
+      do {
+        const data = await graphql(`query HandoffCandidates($botID:BotID!,$after:ContactSearchCursor,$names:[AttributeName!]){
+          bot(id:$botID){contactChatsConnection(first:100,after:$after,assigneeFilter:{type:Any},unreadOnly:false,salesStageV2Filter:[]){
+            edges{node{id name assignee{__typename ... on PublicUserAccount{accountType}}
+              attributes(names:$names){attr{name}value{... on BotAttributeValueString{stringValue}
+                ... on BotAttributeValueBoolean{booleanValue} ... on BotAttributeValueDouble{doubleValue}}}
+              ... on WhatsappContact{phone}}}pageInfo{hasNextPage endCursor}}}}`, { botID, after, names: ATTR });
+        const page = data.bot.contactChatsConnection;
+        for (const { node } of page.edges) {
+          if (!/^wa_\d+_\d+_\d{8,15}$/.test(node.id)) continue;
+          const phone = String(node.phone ?? '').replace(/\D/g, '');
+          if (!/^\d{8,15}$/.test(phone)) continue;
+          const fields = attributeMap(node.attributes);
+          if (node.assignee?.__typename === 'FuelyAIAssignee') {
+            const state = decode(fields.bitrix_agenda_estado, node.id);
+            const active = state && ['name', 'city', 'active', 'period', 'day', 'choose', 'confirm', 'booking', 'confirmed', 'check_pending'].includes(state.step);
+            if ((!yes(fields.solicitud_agendamiento) && !explicitBooking(fields['last user freeform input']))
+              || active || yes(fields.bitrix_reserva_pendiente) || !env.CHATFUEL_BOOKING_FLOW_ID) continue;
+            const current = await graphql('query NaturalBookingContext($botID:BotID!,$id:ConversationID!){bot(id:$botID){conversation(conversationID:$id){status messages(first:20){edges{node{__typename id ... on WhatsAppInTextMessage{text}}}}}}}', { botID, id: node.id });
+            if (current.bot.conversation.status === 'open') continue;
+            const messages = current.bot.conversation.messages.edges.map(edge => edge.node);
+            const incomingIndex = messages.findIndex(message => message.__typename === 'WhatsAppInTextMessage');
+            const incoming = messages[incomingIndex];
+            if (!messages.slice(0, incomingIndex).some(message => message.__typename.startsWith('WhatsAppOut'))) continue;
+            if (!incoming || declineBooking(incoming.text)) continue;
+            const evidence = value => normalize(value).replace(/[¿?¡!.,;:"'«»]/g, '').replace(/\s+/g, ' ').trim();
+            if ((!fields.texto_solicitud_agendamiento || evidence(incoming.text) !== evidence(fields.texto_solicitud_agendamiento)) && !explicitBooking(incoming.text)) continue;
+            const intentHash = createHash('sha256').update(`${node.id}|${incoming.id}`).digest('hex');
+            if (fields.crm_30x_booking_intent_hash === intentHash) continue;
+            const routed = await graphql('mutation NaturalBookingFlow($botID:BotID!,$id:ConversationID!,$flowID:FlowID!){conversationFinishSendToFlow(botID:$botID,conversationID:$id,flowID:$flowID){id status}}', { botID, id: node.id, flowID: env.CHATFUEL_BOOKING_FLOW_ID });
+            if (routed.conversationFinishSendToFlow.id !== node.id) throw new Error('BOOKING_ROUTE_FAILED');
+            await setAttributes(node.id, { crm_30x_booking_intent_hash: intentHash });
+            handoffStatus.bookingFlowsStarted++;
+            continue;
+          }
+          if (node.assignee?.accountType === 'Virtual') continue;
+          const fingerprint = createHash('sha256').update(JSON.stringify([node.id, phone,
+            ...PROFILE.map(name => String(fields[name] ?? ''))])).digest('hex');
+          if ((fields.crm_30x_profile_comment_hash === fingerprint && fields.crm_30x_codigo)
+            || synchronizedProfiles.get(node.id) === fingerprint) continue;
+          const conversation = await graphql('query HandoffState($botID:BotID!,$id:ConversationID!){bot(id:$botID){conversation(conversationID:$id){status}}}',
+            { botID, id: node.id });
+          if (conversation.bot.conversation.status !== 'open') continue;
+          const clientCode = await upsertLead(node.id, phone, fields, { handoff: true, displayName: node.name });
+          await setAttributes(node.id, { crm_30x_codigo: clientCode, crm_30x_profile_comment_hash: fingerprint,
+            crm_30x_handoff_estado: 'registrado', crm_30x_handoff_fecha: new Date(now()).toISOString() });
+          synchronizedProfiles.set(node.id, fingerprint);
+          if (synchronizedProfiles.size > 5000) synchronizedProfiles.delete(synchronizedProfiles.keys().next().value);
+          synchronized++;
+        }
+        after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+      } while (after);
+      handoffStatus.lastSyncAt = new Date(now()).toISOString();
+      handoffStatus.synchronized += synchronized;
+      handoffStatus.lastError = null;
+      return { ok: true, synchronized };
+    })();
+    try { return await syncing; }
+    catch (error) { handoffStatus.lastError = 'HANDOFF_SYNC_FAILED'; throw error; }
+    finally { syncing = null; }
+  }
+  async function profileOrOptions(contactId, phone, fields) {
+    if (no(fields.obligacion_vivienda_activa)) return reply(contactId, { step: 'out_of_scope' },
+      'Esta agenda es para revisar créditos hipotecarios o leasing habitacional activos. Como indicaste que no tienes uno vigente, puedes solicitar a un asesor que revise tu caso.', { done: true });
+    if (!String(fields.nombre_completo ?? '').trim()) return reply(contactId, { step: 'name' }, 'Para agendar con el asesor, ¿cuál es tu nombre completo?');
+    if (!String(fields.ciudad_municipio ?? '').trim()) return reply(contactId, { step: 'city' }, '¿En qué ciudad o municipio estás?');
+    if (!yes(fields.obligacion_vivienda_activa)) return reply(contactId, { step: 'active' },
+      '¿Actualmente tienes un crédito hipotecario o leasing habitacional que todavía estás pagando? Responde SÍ o NO.');
+    const clientCode = await upsertLead(contactId, phone, fields);
+    await setAttributes(contactId, { crm_30x_codigo: clientCode });
+    return askPeriod(contactId, clientCode);
+  }
+
+  const handle = async function handle(request) {
+    const url = new URL(request.url);
+    if (url.pathname === '/health' && request.method === 'GET') return json({ ok: configured,
+      service: 'chatfuel-bitrix-booking', version: RELEASE_VERSION, handoff: { ...handoffStatus } }, configured ? 200 : 503);
+    if (!['/booking', '/sync-handoffs'].includes(url.pathname) || request.method !== 'POST') return json({ error: 'NOT_FOUND' }, 404);
+    if (!configured) return json({ error: 'NOT_CONFIGURED' }, 503);
+    if (!same(request.headers.get('authorization') ?? '', `Bearer ${secret}`)) return json({ error: 'UNAUTHORIZED' }, 401);
+    if (url.pathname === '/sync-handoffs') {
+      try { return json(await synchronizeHandoffs()); }
+      catch { return json({ error: 'HANDOFF_SYNC_FAILED' }, 503); }
+    }
+    let body;
+    try { body = await request.json(); } catch { return json({ error: 'INVALID_JSON' }, 400); }
+    const { contactId, operation } = body;
+    // Preview sessions cannot create CRM leads or appointments.
+    if (typeof contactId === 'string' && /^(?:wa_)?cfPreview:/.test(contactId)) return json({
+      message: 'Este es un chat de prueba. La conexión de agenda respondió; no se creó ninguna negociación ni cita real. En WhatsApp la asistente ofrece organizar la llamada y consulta los horarios al continuar.', done: 'si', human: 'no' });
+    if (typeof contactId !== 'string' || !/^wa_\d+_\d+_\d{8,15}$/.test(contactId)
+      || !['start', 'step'].includes(operation)) return json({ error: 'INVALID_CONTACT_OR_OPERATION' }, 422);
+    try {
+      const { phone, fields } = await contact(contactId);
+      const answer = String(fields.bitrix_agenda_respuesta ?? '').trim();
+      const state = decode(fields.bitrix_agenda_estado, contactId);
+      if (state?.step === 'confirmed') return reply(contactId, state,
+        `Tu cita ya está confirmada para ${label(state.slot)} (hora de Colombia).`, { done: true });
+      if (yes(fields.bitrix_reserva_pendiente) && state?.step !== 'booking') return reply(contactId,
+        { step: 'check_pending' }, 'Hay una reserva pendiente de verificación. Un asesor debe comprobarla antes de solicitar otra cita.', { done: true });
+      if (operation === 'start' && state?.step !== 'booking') return profileOrOptions(contactId, phone, fields);
+      if (!state) return reply(contactId, { step: 'restart' },
+        'La consulta de horarios venció. Tu cita no se ha confirmado; puedes pedirme que vuelva a consultar la disponibilidad.', { done: true });
+      if (/(?:hablar|comunicar|pasame|pasarme|contactar).*(?:asesor|persona|humano)|(?:asesor|persona|humano)\s+ahora|^(?:quiero|necesito)\s+(?:un\s+)?asesor|\b(?:demanda|embargo|remate|cobro juridico|urgente)\b/.test(normalize(answer))) return reply(contactId,
+        { step: 'human_requested', clientCode: state.clientCode }, 'La atención pasa al equipo de Avanzar para revisar tu caso con el contexto disponible.', { done: true, human: true });
+      if (state.step === 'active' && /^(no|n|0|false)[.!\s]*$/.test(normalize(answer))) {
+        await setAttributes(contactId, { obligacion_vivienda_activa: 'no' });
+        return profileOrOptions(contactId, phone, { ...fields, obligacion_vivienda_activa: 'no' });
+      }
+      if (state.step !== 'booking' && declineBooking(answer)) return reply(contactId, { step: 'cancelled', clientCode: state.clientCode },
+        'Dejamos la llamada pendiente. No reservé ninguna cita; puedes pedirme que retomemos el agendamiento cuando lo prefieras.', { done: true });
+      if (state.step === 'name' || state.step === 'city') {
+        const valid = state.step === 'name'
+          ? /^[\p{L}][\p{L}\p{M}' .-]{2,119}$/u.test(answer) && answer.split(/\s+/).length >= 2
+          : /^[\p{L}\p{N}][\p{L}\p{M}\p{N}' ,.-]{1,99}$/u.test(answer);
+        if (!valid) return reply(contactId, state, state.step === 'name' ? 'Por favor, escribe tu nombre y apellido para agendar.' : 'Por favor, escribe el nombre de tu ciudad o municipio.');
+        const name = state.step === 'name' ? 'nombre_completo' : 'ciudad_municipio';
+        await setAttributes(contactId, { [name]: answer });
+        return profileOrOptions(contactId, phone, { ...fields, [name]: answer });
+      }
+      if (state.step === 'active') {
+        if (!yes(answer)) return reply(contactId, state, 'Para esta agenda de RCH necesito confirmar si tienes crédito hipotecario o leasing habitacional vigente. Responde SÍ o NO.');
+        await setAttributes(contactId, { obligacion_vivienda_activa: 'si', linea_interes: 'RCH' });
+        return profileOrOptions(contactId, phone, { ...fields, obligacion_vivienda_activa: 'si' });
+      }
+      if (['period', 'day', 'choose', 'confirm'].includes(state.step)) {
+        const text = normalize(answer);
+        if (/\b(?:otro dia|cambiar (?:de )?dia|otra fecha)\b/.test(text)) return offerDays(contactId, state.clientCode,
+          { fromTime: state.fromTime || '08:30', toTime: state.toTime || '17:00' });
+        if (/\b(?:otra franja|cambiar (?:de )?franja)\b/.test(text)) return askPeriod(contactId, state.clientCode, { date: state.date });
+        if (state.step === 'period') {
+          const index = selection(answer, 2);
+          const window = index !== null ? PERIODS[index] : periodFrom(answer);
+          if (!window) return reply(contactId, state, '¿Prefieres el contacto en la mañana o en la tarde?');
+          return state.date ? offerTimes(contactId, { ...state, ...window }, state.date) : offerDays(contactId, state.clientCode, window);
+        }
+        if (state.step === 'day') {
+          const date = selectedDay(answer, state.days, now());
+          if (!date) return reply(contactId, state, `Puedes elegir ${state.days.map(dayLabel).join(' o ')}. ¿Cuál prefieres?`);
+          const requestedWindow = /(?:en|por) la (?:tarde|manana)\b/.test(text) ? periodFrom(answer) : null;
+          return offerTimes(contactId, { ...state, ...(requestedWindow || {}) }, date);
+        }
+        if (/(?:en|por) la (?:tarde|manana)\b|^tarde$/.test(text)) {
+          const window = periodFrom(answer);
+          if (window && (window.fromTime !== state.fromTime || window.toTime !== state.toTime)) return offerTimes(contactId, { ...state, ...window }, state.date || dateAt(state.slots[0].startAt));
+        }
+      }
+      if (state.step === 'choose') {
+        if (/^(?:mas|otras opciones|otros horarios|mas opciones|mas horarios|no me sirven|ningun[oa] me sirve|ninguno|ninguna)[.!]*$/.test(normalize(answer))) return options(contactId, state.clientCode, state.excludedStarts || state.slots.map(s => s.startAt), state);
+        let index = selection(answer, state.slots.length);
+        const clock = normalize(answer).match(/^(?:(?:a las|la de las|prefiero a las)\s+)?([01]?\d|2[0-3])(?::([0-5]\d))?(?:\s*(am|pm))?[.!]*$/);
+        if (index === null && clock) {
+          let hour = Number(clock[1]);
+          if (clock[3] === 'pm' && hour < 12) hour += 12;
+          if (clock[3] === 'am' && hour === 12) hour = 0;
+          const time = `${String(hour).padStart(2, '0')}:${clock[2] || '00'}`;
+          const matches = state.slots.map((slot, i) => timeAt(slot.startAt) === time ? i : -1).filter(i => i >= 0);
+          if (matches.length === 1) index = matches[0];
+        }
+        if (index === null) return reply(contactId, state, '¿Cuál de los horarios ofrecidos te sirve? Puedes responder con la hora, el número o decir, por ejemplo, «la primera». También podemos revisar otro día u otra franja.');
+        const slot = state.slots[index];
+        return reply(contactId, { ...state, step: 'confirm', slot },
+          `Elegiste ${label(slot)} (hora de Colombia), para una llamada de 10 minutos. ¿Confirmas que reserve ese horario? Responde SÍ o CANCELAR.`);
+      }
+      if (state.step === 'confirm' || state.step === 'booking') {
+        if (state.step === 'confirm' && !confirmBooking(answer)) return reply(contactId, state, '¿Confirmas que reserve el horario elegido? Si prefieres dejarlo pendiente, también me lo puedes decir.');
+        const key = `chatfuel-${createHash('sha256').update(`${contactId}|${state.clientCode}|${state.slot.startAt}|${state.slot.advisorId}`).digest('hex')}`;
+        await setAttributes(contactId, { bitrix_reserva_pendiente: 'si',
+          bitrix_agenda_estado: encode(contactId, { ...state, step: 'booking' }) });
+        try {
+          const result = await crm(`/api/v1/leads/${encodeURIComponent(state.clientCode)}/appointments`, {
+            startAt: state.slot.startAt, durationMinutes: 10, advisorId: state.slot.advisorId,
+            advisorPool: true, idempotencyKey: key,
+          }, key);
+          const booking = result.data;
+          if (booking?.status !== 'confirmed' || !/^\d+$/.test(String(booking.bitrixEventId ?? ''))
+            || Number(booking.bitrixEventId) <= 0 || !booking.appointmentId
+            || Date.parse(booking.startAt) !== Date.parse(state.slot.startAt)
+            || Date.parse(booking.endAt) - Date.parse(booking.startAt) !== 600_000) throw new Error('INVALID_BOOKING_CONFIRMATION');
+          return reply(contactId, { step: 'confirmed', clientCode: state.clientCode,
+            slot: state.slot, bitrixEventId: String(booking.bitrixEventId), appointmentId: booking.appointmentId },
+          `Tu llamada quedó agendada para ${label(state.slot)} (hora de Colombia). Duración: 10 minutos. Te esperamos; si necesitas revisarla, escríbenos por este mismo chat.`,
+          { done: true, fields: { bitrix_reserva_pendiente: 'no', bitrix_evento_id: booking.bitrixEventId, bitrix_cita_id: booking.appointmentId,
+            bitrix_cita_inicio: booking.startAt, crm_30x_codigo: state.clientCode } });
+        } catch (error) {
+          if (error.message === 'SLOT_UNAVAILABLE') {
+            await setAttributes(contactId, { bitrix_reserva_pendiente: 'no' });
+            return options(contactId, state.clientCode, state.excludedStarts || [state.slot.startAt], { ...state, date: state.date || dateAt(state.slot.startAt) });
+          }
+          throw error;
+        }
+      }
+      return reply(contactId, { step: 'restart' }, 'Puedes pedirme que volvamos a revisar los horarios para la llamada.', { done: true });
+    } catch {
+      // A failure may happen after Bitrix accepted a booking; never claim it was not booked.
+      return json({ message: 'No pude verificar el estado de la agenda en este momento. Evita solicitar otra cita hasta que confirmemos si la reserva se completó. Puedes pedir ayuda a un asesor.', done: 'si', human: 'no', error: 'BOOKING_CHECK_REQUIRED' });
+    }
+  };
+  handle.synchronizeHandoffs = synchronizeHandoffs;
+  handle.handoffStatus = handoffStatus;
+  return handle;
+}
+
+export function startHandoffListener(handler, { env = process.env, WebSocketImpl = globalThis.WebSocket,
+  delay = setTimeout, cancelDelay = clearTimeout } = {}) {
+  let socket, reconnectTimer, heartbeat, retryTimer;
+  let stopped = false, retryDelay = 1000;
+  let running = false, runAgain = false;
+  const state = handler.handoffStatus;
+  async function sync() {
+    runAgain = true;
+    if (running) return;
+    running = true;
+    try {
+      do { runAgain = false; await handler.synchronizeHandoffs(); }
+      while (runAgain && !stopped);
+    }
+    catch {
+      if (!stopped && !retryTimer) retryTimer = delay(() => { retryTimer = null; void sync(); }, 10_000);
+    }
+    finally { running = false; }
+  }
+  function beat() {
+    if (stopped || socket?.readyState !== 1) return;
+    socket.send(JSON.stringify({ type: 'ping' }));
+    heartbeat = delay(beat, 10_000);
+  }
+  function connect() {
+    if (stopped) return;
+    socket = new WebSocketImpl('wss://panel.chatfuel.com/graphql', 'graphql-transport-ws');
+    socket.onopen = () => socket.send(JSON.stringify({ type: 'connection_init',
+      payload: { authToken: `Bearer ${env.CHATFUEL_API_TOKEN}` } }));
+    socket.onmessage = event => {
+      let message;
+      try { message = JSON.parse(String(event.data)); } catch { return; }
+      if (message.type === 'connection_ack') {
+        state.connected = true; retryDelay = 1000;
+        socket.send(JSON.stringify({ id: 'handoffs', type: 'subscribe', payload: {
+          query: 'subscription HandoffNotifications($botID:BotID!){contactsChatUpdates(botID:$botID,assigneeFilter:{type:Any},unreadOnly:false,salesStageV2Filter:[]){__typename}}',
+          variables: { botID: env.CHATFUEL_BOT_ID },
+        } }));
+        heartbeat = delay(beat, 10_000);
+        void sync();
+      } else if (message.type === 'ping') socket.send(JSON.stringify({ type: 'pong', ...(message.payload ? { payload: message.payload } : {}) }));
+      else if (message.type === 'next') {
+        if (message.payload?.errors?.length) { state.lastError = 'SUBSCRIPTION_FAILED'; socket.close(); }
+        else void sync();
+      } else if (message.type === 'error') { state.lastError = 'SUBSCRIPTION_FAILED'; socket.close(); }
+    };
+    socket.onclose = () => {
+      state.connected = false;
+      if (heartbeat) cancelDelay(heartbeat);
+      if (!stopped) { reconnectTimer = delay(connect, retryDelay); retryDelay = Math.min(retryDelay * 2, 30_000); }
+    };
+    socket.onerror = () => { state.lastError = 'WEBSOCKET_FAILED'; socket.close(); };
+  }
+  connect();
+  return () => {
+    stopped = true;
+    for (const timer of [reconnectTimer, heartbeat, retryTimer]) if (timer) cancelDelay(timer);
+    socket?.close();
+  };
+}
+
+if (globalThis.Bun) {
+  const handler = createHandler({ env: Bun.env });
+  Bun.serve({ port: Number(Bun.env.PORT || 3000), fetch: handler });
+  if (Bun.env.HANDOFF_SYNC_ENABLED === 'true') startHandoffListener(handler, { env: Bun.env });
+}

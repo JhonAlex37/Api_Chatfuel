@@ -1,0 +1,442 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHandler, profileComment } from '../src/connector.mjs';
+
+const CONTACT = 'wa_999999999999_888888888888_573000000001';
+const SECRET = 'local-test-secret-for-mock-testing-only-12345';
+const START = Date.parse('2026-11-03T21:00:00Z');
+const SLOTS = [
+  { startAt: '2026-11-04T14:00:00Z', advisorId: 'advisor-one' },
+  { startAt: '2026-11-04T14:20:00Z', advisorId: 'advisor-one' },
+  { startAt: '2026-11-04T14:40:00Z', advisorId: 'advisor-one' },
+  { startAt: '2026-11-04T18:00:00Z', advisorId: 'advisor-one' },
+  { startAt: '2026-11-04T18:20:00Z', advisorId: 'advisor-one' },
+  { startAt: '2026-11-04T18:40:00Z', advisorId: 'advisor-one' },
+  { startAt: '2026-11-05T15:00:00Z', advisorId: 'advisor-two' },
+  { startAt: '2026-11-05T15:20:00Z', advisorId: 'advisor-two' },
+  { startAt: '2026-11-05T15:40:00Z', advisorId: 'advisor-two' },
+  { startAt: '2026-11-05T19:00:00Z', advisorId: 'advisor-two' },
+  { startAt: '2026-11-05T19:20:00Z', advisorId: 'advisor-two' },
+  { startAt: '2026-11-05T19:40:00Z', advisorId: 'advisor-two' },
+  { startAt: '2026-11-06T16:00:00Z', advisorId: 'advisor-one' },
+].map(slot => ({ ...slot, endAt: new Date(Date.parse(slot.startAt) + 600_000).toISOString() }));
+
+function fixture({ initial = {}, bookingError = null, invalidBooking = false,
+  human = false, live = true, failLead = false, latestText = 'Sí, quiero agendar una llamada',
+  naturalStatus = 'closed', botReplied = true, staleHandoffIndex = false } = {}) {
+  const fields = { nombre_completo: 'Persona de Prueba', ciudad_municipio: 'Bogotá',
+    obligacion_vivienda_activa: 'si', ...initial };
+  const calls = [];
+  const initialSearchFields = { ...fields };
+  let time = START;
+  let failed = false;
+  const mockFetch = async (url, init) => {
+    const payload = JSON.parse(init.body);
+    calls.push({ url, payload, headers: init.headers });
+    if (url.endsWith('/graphql')) {
+      if (payload.query.includes('query NaturalBookingContext')) return Response.json({ data: { bot: { conversation: {
+        status: naturalStatus, messages: { edges: [...(botReplied ? [{ node: { __typename: 'WhatsAppOutTextMessage', id: 'outgoing-1' } }] : []), { node: { __typename: 'WhatsAppInTextMessage', id: 'incoming-1', text: latestText } }] },
+      } } } });
+      if (payload.query.includes('mutation NaturalBookingFlow')) return Response.json({ data: {
+        conversationFinishSendToFlow: { id: CONTACT, status: 'closed' },
+      } });
+      if (payload.query.includes('query HandoffCandidates')) return Response.json({ data: { bot: { contactChatsConnection: {
+        edges: [{ node: { id: CONTACT, name: 'Perfil WhatsApp de prueba', phone: '573000000001',
+          assignee: human === 'shared' ? null : human ? { __typename: 'PublicUserAccount', accountType: 'Human' } : { __typename: 'FuelyAIAssignee' },
+          attributes: Object.entries(staleHandoffIndex ? initialSearchFields : fields).map(([name, value]) => ({ attr: { name }, value: { stringValue: String(value) } })),
+        } }], pageInfo: { hasNextPage: false, endCursor: null },
+      } } } });
+      if (payload.query.includes('query HandoffState')) return Response.json({ data: { bot: {
+        conversation: { status: live ? 'open' : 'closed' },
+      } } });
+      if (payload.query.includes('query BookingContact')) return Response.json({ data: { bot: { contact: {
+        id: CONTACT, phone: '573000000001', attributes: Object.entries(fields).map(([name, value]) =>
+          ({ attr: { name }, value: { stringValue: String(value) } })),
+      } } } });
+      const data = {};
+      for (const match of payload.query.matchAll(/a(\d+):contactAttributeUpdate\(id:\$id,attrName:("(?:\\.|[^"\\])*"),attrValue:\$v\d+\)/g)) {
+        fields[JSON.parse(match[2])] = payload.variables[`v${match[1]}`];
+        data[`a${match[1]}`] = { id: CONTACT };
+      }
+      assert.ok(Object.keys(data).length, 'Mutation must update known custom attributes');
+      return Response.json({ data });
+    }
+    if (url.endsWith('/prospecting-bot/lead')) return Response.json({ ok: !failLead, persisted: !failLead, clientId: failLead ? null : 'CLI-MOCK-ONLY' });
+    if (url.endsWith('/leads/resolve')) return Response.json({ ok: true, data: { clientCode: 'CLI-MOCK-ONLY', advisorAssigned: true, created: false } });
+    if (url.endsWith('/availability')) return Response.json({ ok: true, data: {
+      source: 'bitrix_accessibility', slots: SLOTS.filter(s => !payload.excludeStarts.includes(s.startAt)),
+    } });
+    if (url.endsWith('/appointments')) {
+      if (bookingError === 'conflict' && !failed) {
+        failed = true;
+        return Response.json({ ok: false, error: { code: 'SLOT_UNAVAILABLE' } }, { status: 409 });
+      }
+      if (bookingError === 'network-once' && !failed) { failed = true; throw new Error('simulated lost response'); }
+      return Response.json({ ok: true, data: { appointmentId: 'mock-booking', bitrixEventId: invalidBooking ? '' : '12345',
+        status: 'confirmed', startAt: payload.startAt, endAt: new Date(Date.parse(payload.startAt) + 600_000).toISOString() } });
+    }
+    throw new Error(`Unexpected mocked endpoint: ${url}`);
+  };
+  const handle = createHandler({ env: { CHATFUEL_BOT_ID: 'mock-bot', CHATFUEL_BOOKING_SECRET: SECRET,
+    CHATFUEL_API_TOKEN: 'mock-chatfuel-token', AI_FIRST_ONE_BASE_URL: 'https://crm.mock.invalid',
+    AI_FIRST_ONE_APPOINTMENTS_TOKEN: 'mock-crm-token', CHATFUEL_BOOKING_FLOW_ID: 'mock-flow' }, fetchImpl: mockFetch, now: () => time });
+  const request = async (operation = 'step', answer, extras = {}) => {
+    if (answer !== undefined) fields.bitrix_agenda_respuesta = answer;
+    const response = await handle(new Request('https://connector.mock.invalid/booking', { method: 'POST',
+      headers: { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contactId: CONTACT, operation, ...extras }) }));
+    return { status: response.status, ...await response.json() };
+  };
+  const bookings = () => calls.filter(c => c.url.endsWith('/appointments'));
+  return { fields, calls, request, handle, bookings, advance: ms => { time += ms; } };
+}
+
+async function prepareOptions(f) {
+  await f.request('start');
+  await f.request('step', 'en la mañana');
+  return f.request('step', '1');
+}
+
+test('unauthorized and preview requests create no CRM records', async () => {
+  const f = fixture();
+  const response = await f.handle(new Request('https://connector.mock.invalid/booking', { method: 'POST', body: '{}' }));
+  assert.equal(response.status, 401);
+  assert.equal((await f.request('start', undefined, { contactId: 'cfPreview:mock' })).status, 200);
+  assert.equal((await f.request('start', undefined, { contactId: 'wa_cfPreview:mock' })).status, 200);
+  assert.equal(f.calls.length, 0);
+});
+
+test('missing profile is collected before creating a negotiation', async () => {
+  const f = fixture({ initial: { nombre_completo: '', ciudad_municipio: '', obligacion_vivienda_activa: '' } });
+  assert.match((await f.request('start')).message, /nombre completo/);
+  assert.match((await f.request('step', 'Persona de Prueba')).message, /ciudad/);
+  assert.match((await f.request('step', 'Bogotá')).message, /actualmente/i);
+  assert.equal(f.calls.filter(c => c.url.includes('crm.mock')).length, 0);
+  assert.match((await f.request('step', 'sí')).message, /mañana o en la tarde/);
+  assert.equal(f.fields.crm_30x_codigo, 'CLI-MOCK-ONLY');
+  assert.equal(f.bookings().length, 0);
+});
+
+test('selection alone never reserves; explicit confirmation does; repeated requests are idempotent', async () => {
+  const f = fixture();
+  await prepareOptions(f);
+  assert.equal(f.bookings().length, 0);
+  assert.match((await f.request('step', '1')).message, /Confirmas/);
+  assert.equal(f.bookings().length, 0);
+  assert.match((await f.request('step', 'quizás')).message, /Confirmas/);
+  const booked = await f.request('step', 'SÍ');
+  assert.equal(booked.done, 'si');
+  assert.match(booked.message, /quedó agendada/);
+  assert.equal(f.fields.bitrix_evento_id, '12345');
+  assert.equal(f.fields.bitrix_reserva_pendiente, 'no');
+  await f.request('step', 'SÍ');
+  await f.request('start');
+  assert.equal(f.bookings().length, 1);
+  assert.equal(f.bookings()[0].headers['Idempotency-Key'], f.bookings()[0].payload.idempotencyKey);
+});
+
+test('cancel and negative active-credit answer never book', async () => {
+  const f = fixture({ initial: { obligacion_vivienda_activa: '' } });
+  await f.request('start');
+  assert.equal((await f.request('step', 'NO')).done, 'si');
+  assert.equal(f.bookings().length, 0);
+  assert.equal(f.calls.filter(c => c.url.includes('crm.mock')).length, 0);
+  assert.equal(f.fields.obligacion_vivienda_activa, 'no');
+});
+
+test('tampered and expired selections cannot book', async () => {
+  for (const mode of ['tampered', 'expired']) {
+    const f = fixture();
+    await prepareOptions(f);
+    if (mode === 'tampered') f.fields.bitrix_agenda_estado = `${f.fields.bitrix_agenda_estado}x`;
+    else f.advance(31 * 60_000);
+    assert.match((await f.request('step', '1')).message, /venció/);
+    assert.equal(f.bookings().length, 0);
+  }
+});
+
+test('lost booking response retries the same reservation with the same idempotency key', async () => {
+  const f = fixture({ bookingError: 'network-once' });
+  await prepareOptions(f); await f.request('step', '1');
+  assert.equal((await f.request('step', 'SÍ')).error, 'BOOKING_CHECK_REQUIRED');
+  assert.equal(f.fields.bitrix_reserva_pendiente, 'si');
+  const result = await f.request('start');
+  assert.match(result.message, /quedó agendada/);
+  assert.equal(f.bookings().length, 2);
+  assert.equal(f.bookings()[0].payload.idempotencyKey, f.bookings()[1].payload.idempotencyKey);
+});
+
+test('missing actual Bitrix event id never yields a confirmed message', async () => {
+  const f = fixture({ invalidBooking: true });
+  await prepareOptions(f); await f.request('step', '1');
+  const result = await f.request('step', 'SÍ');
+  assert.equal(result.error, 'BOOKING_CHECK_REQUIRED');
+  assert.doesNotMatch(result.message, /quedó agendada/);
+  assert.equal(f.fields.bitrix_reserva_pendiente, 'si');
+});
+
+test('conflicting slot refreshes real availability and requires a new selection', async () => {
+  const f = fixture({ bookingError: 'conflict' });
+  await prepareOptions(f); await f.request('step', '1');
+  const result = await f.request('step', 'SÍ');
+  assert.equal(result.done, 'no');
+  assert.match(result.message, /horarios/);
+  assert.equal(f.fields.bitrix_reserva_pendiente, 'no');
+  assert.equal(f.bookings().length, 1);
+});
+
+test('human handoff creates a negotiation once and updates the same code when the profile changes', async () => {
+  const f = fixture({ human: true, initial: { senal_reducir_plazo: 'sí, quiere terminar antes' } });
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 1);
+  assert.equal(f.fields.crm_30x_codigo, 'CLI-MOCK-ONLY');
+  assert.equal(f.fields.crm_30x_handoff_estado, 'registrado');
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 0);
+  f.fields.banco_entidad = 'Entidad de prueba';
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 1);
+  const leads = f.calls.filter(c => c.url.endsWith('/prospecting-bot/lead'));
+  assert.equal(leads.length, 2);
+  assert.equal(leads[1].payload.externalLeadId, 'CLI-MOCK-ONLY');
+  assert.equal(leads[1].payload.status, 'requiere_asesor');
+  assert.equal(leads[1].payload.answers.solicitudAsesor, true);
+  assert.equal(leads[1].payload.answers.senal_reducir_plazo, 'sí, quiere terminar antes');
+  assert.equal(f.bookings().length, 0);
+});
+
+test('automated and closed conversations do not create handoff negotiations', async () => {
+  for (const options of [{ human: false }, { human: true, live: false }, { human: 'shared', live: false }]) {
+    const f = fixture(options);
+    assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 0);
+    assert.equal(f.calls.filter(c => c.url.includes('crm.mock')).length, 0);
+  }
+});
+
+test('human handoff accepts an incomplete profile without inventing credit status or a score', async () => {
+  const f = fixture({ human: true, initial: { nombre_completo: '', ciudad_municipio: '', obligacion_vivienda_activa: '' } });
+  await f.handle.synchronizeHandoffs();
+  const lead = f.calls.find(c => c.url.endsWith('/prospecting-bot/lead')).payload;
+  assert.equal(lead.answers.nombreConfirmado, false);
+  assert.equal(lead.answers.tieneCreditoHipotecario, null);
+  assert.equal(lead.score, undefined);
+  assert.equal(lead.city, undefined);
+  assert.equal(lead.contactName, 'Perfil WhatsApp de prueba');
+});
+
+test('new Chatfuel answers produce an advisor comment and reach the existing 30X negotiation', async () => {
+  const f = fixture({ human: 'shared', initial: { rch_banco: 'Bancolombia', rch_frech: 'si',
+    rch_saldo_millones: '80', rch_saldo_evidencia: 'me faltan 80 millones',
+    rch_anos_pagando: '2', rch_cuotas_atrasadas: '0', banco_entidad: 'Dato anterior' } });
+  await f.handle.synchronizeHandoffs();
+  const lead = f.calls.find(c => c.url.endsWith('/prospecting-bot/lead')).payload;
+  assert.match(lead.summary, /Chatfuel conversó con Persona de Prueba, de Bogotá/);
+  assert.match(lead.summary, /Entidad del crédito: Bancolombia/);
+  assert.match(lead.summary, /tener cobertura de tasa Mi Casa Ya o FRECH/);
+  assert.match(lead.summary, /80\.000\.000/);
+  assert.match(lead.summary, /Tiempo que lleva pagando, en años: 2/);
+  assert.match(lead.summary, /cero cuotas vencidas/);
+  assert.match(lead.summary, /transferencia al equipo humano/);
+  assert.doesNotMatch(lead.summary, /Datos pendientes:/);
+  assert.equal(lead.answers.banco, 'Bancolombia');
+  assert.equal(lead.answers.rch_saldo_millones, '80');
+  assert.equal(lead.answers.rch_cuotas_atrasadas, '0');
+  assert.equal(lead.score, undefined);
+  assert.equal(lead.temperature, undefined);
+});
+
+test('profile comments distinguish missing facts and display names from confirmed customer data', () => {
+  const comment = profileComment({ rch_banco: 'FNA', rch_saldo_millones: 'PENDIENTE',
+    rch_saldo_evidencia: 'debo como 50', rch_frech: 'desconocido', rch_anos_pagando: 'no sabe' },
+  { handoff: true, displayName: 'Nombre del perfil' });
+  assert.match(comment, /contacto de WhatsApp: Nombre del perfil/);
+  assert.match(comment, /nombre completo confirmado/);
+  assert.match(comment, /«debo como 50»/);
+  assert.match(comment, /saldo pendiente en dinero por confirmar/);
+  assert.doesNotMatch(comment, /50\.000\.000|clasifica al cliente|no tener cobertura|Chatfuel conversó con Nombre del perfil/);
+});
+
+test('zero balance, zero elapsed years and explicit no coverage are preserved without inference', async () => {
+  const f = fixture({ human: true, initial: { rch_banco: 'FNA', rch_frech: false,
+    rch_saldo_millones: 0, rch_anos_pagando: 0, rch_cuotas_atrasadas: 0 } });
+  await f.handle.synchronizeHandoffs();
+  const lead = f.calls.find(c => c.url.endsWith('/prospecting-bot/lead')).payload;
+  assert.match(lead.summary, /Declara no tener cobertura/);
+  assert.match(lead.summary, /Saldo pendiente de dinero declarado:.*0.*COP/);
+  assert.match(lead.summary, /Tiempo que lleva pagando, en años: 0/);
+  assert.match(lead.summary, /cero cuotas vencidas/);
+  assert.equal(lead.answers.rch_saldo_millones, '0');
+  assert.equal(lead.answers.rch_frech, 'false');
+});
+
+test('a changed new questionnaire answer refreshes the same lead once without duplicate comments', async () => {
+  const f = fixture({ human: true, initial: { rch_banco: 'Davivienda', rch_saldo_millones: '80' } });
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 1);
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 0);
+  f.fields.rch_saldo_millones = '50,5';
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 1);
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 0);
+  const leads = f.calls.filter(c => c.url.endsWith('/prospecting-bot/lead'));
+  assert.equal(leads.length, 2);
+  assert.equal(leads[1].payload.externalLeadId, leads[0].payload.externalLeadId);
+  assert.match(leads[1].payload.summary, /50\.500\.000/);
+});
+
+test('stale contact search and legacy deployment fingerprints do not duplicate profile comments', async () => {
+  const f = fixture({ human: true, staleHandoffIndex: true,
+    initial: { rch_banco: 'Bancolombia', crm_30x_handoff_hash: 'legacy-deployment-hash' } });
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 1);
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 0);
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 0);
+  assert.equal(f.calls.filter(c => c.url.endsWith('/prospecting-bot/lead')).length, 1);
+  assert.equal(f.fields.crm_30x_handoff_hash, 'legacy-deployment-hash');
+  assert.ok(f.fields.crm_30x_profile_comment_hash);
+});
+
+test('booking profile uses legacy facts as fallback and keeps reservation unconfirmed', async () => {
+  const f = fixture({ initial: { banco_entidad: 'Caja Social', anos_pagados: 'entre 2 y 3', estado_pago: 'al día' } });
+  await f.request('start');
+  const lead = f.calls.find(c => c.url.endsWith('/prospecting-bot/lead')).payload;
+  assert.match(lead.summary, /Entidad del crédito: Caja Social/);
+  assert.match(lead.summary, /años: entre 2 y 3/);
+  assert.match(lead.summary, /pendiente de confirmación técnica en Bitrix/);
+  assert.match(lead.summary, /Datos pendientes: cobertura de tasa Mi Casa Ya o FRECH; saldo pendiente en dinero/);
+  assert.doesNotMatch(lead.summary, /número de cuotas vencidas sin pagar/);
+  assert.equal(f.bookings().length, 0);
+});
+
+test('a rejected CRM write does not mark handoff synchronization as complete', async () => {
+  const f = fixture({ human: true, failLead: true });
+  await assert.rejects(f.handle.synchronizeHandoffs());
+  assert.equal(f.fields.crm_30x_handoff_hash, undefined);
+  assert.equal(f.fields.crm_30x_handoff_estado, undefined);
+  assert.equal(f.handle.handoffStatus.lastError, 'HANDOFF_SYNC_FAILED');
+});
+
+test('handoff to an unassigned shared inbox creates the negotiation once', async () => {
+  const f = fixture({ human: 'shared' });
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 1);
+  assert.equal(f.fields.crm_30x_codigo, 'CLI-MOCK-ONLY');
+  assert.equal(f.fields.crm_30x_handoff_estado, 'registrado');
+  assert.equal((await f.handle.synchronizeHandoffs()).synchronized, 0);
+  assert.equal(f.calls.filter(c => c.url.endsWith('/prospecting-bot/lead')).length, 1);
+});
+
+test('booking asks for a period, offers two verified days, then three times in that period', async () => {
+  const f = fixture();
+  const period = await f.request('start');
+  assert.match(period.message, /mañana o en la tarde/);
+  assert.equal(f.calls.filter(c => c.url.endsWith('/availability')).length, 0);
+  const days = await f.request('step', 'en la tarde');
+  assert.match(days.message, /Qué día prefieres/);
+  assert.equal(JSON.parse(Buffer.from(days.state.split('.')[0], 'base64url')).days.length, 2);
+  const times = await f.request('step', 'mañana');
+  const state = JSON.parse(Buffer.from(times.state.split('.')[0], 'base64url'));
+  assert.equal(state.date, '2026-11-04');
+  assert.equal(state.slots.length, 3);
+  assert.equal(state.fromTime, '12:00');
+  assert.ok(state.slots.every(s => Date.parse(s.startAt) >= Date.parse('2026-11-04T17:00:00Z')));
+  assert.doesNotMatch(period.message + days.message + times.message, /AGENDAR/);
+  assert.equal(f.bookings().length, 0);
+});
+
+test('weekday, ordinal selection and natural confirmation reserve only the selected time', async () => {
+  const f = fixture();
+  await f.request('start');
+  await f.request('step', 'en la mañana');
+  await f.request('step', 'jueves por la tarde');
+  assert.match((await f.request('step', 'la primera')).message, /Confirmas/);
+  assert.equal(f.bookings().length, 0);
+  assert.match((await f.request('step', 'dale')).message, /quedó agendada/);
+  assert.equal(f.bookings()[0].payload.startAt, '2026-11-05T19:00:00Z');
+});
+
+test('the user can ask for another day or period without restarting the profile', async () => {
+  const f = fixture();
+  await prepareOptions(f);
+  assert.match((await f.request('step', 'otra franja')).message, /mañana o en la tarde/);
+  const times = await f.request('step', 'en la tarde');
+  assert.match(times.message, /horarios libres/);
+  const state = JSON.parse(Buffer.from(times.state.split('.')[0], 'base64url'));
+  assert.equal(state.date, '2026-11-04');
+  assert.equal(state.fromTime, '12:00');
+  assert.match((await f.request('step', 'otro día')).message, /Qué día prefieres/);
+  assert.equal(f.calls.filter(c => c.url.endsWith('/prospecting-bot/lead')).length, 1);
+});
+
+test('questions and negated mentions of a time do not select or book it', async () => {
+  const f = fixture();
+  await prepareOptions(f);
+  for (const answer of ['no quiero la primera', '¿la primera?', 'si puedo, la primera']) {
+    const response = await f.request('step', answer);
+    assert.match(response.message, /Cuál de los horarios/);
+  }
+  assert.equal(f.bookings().length, 0);
+  assert.match((await f.request('step', '9 am')).message, /Confirmas/);
+  assert.equal(f.bookings().length, 0);
+});
+
+test('asking for a person during booking exits toward human attention without reserving', async () => {
+  const f = fixture();
+  await prepareOptions(f);
+  const response = await f.request('step', 'quiero hablar con un asesor');
+  assert.equal(response.done, 'si');
+  assert.equal(response.human, 'si');
+  assert.equal(f.bookings().length, 0);
+});
+
+test('new CRM negotiations resolve through the enabled advisor rotation before profile upsert', async () => {
+  const f = fixture({ human: 'shared' });
+  await f.handle.synchronizeHandoffs();
+  const crmCalls = f.calls.filter(c => c.url.includes('crm.mock'));
+  assert.ok(crmCalls[0].url.endsWith('/leads/resolve'));
+  assert.equal(crmCalls[1].payload.externalLeadId, 'CLI-MOCK-ONLY');
+});
+
+test('accepting the offered call opens the booking flow once without a keyword', async () => {
+  const f = fixture({ initial: { solicitud_agendamiento: 'si', texto_solicitud_agendamiento: 'Sí, quiero agendar una llamada' } });
+  await f.handle.synchronizeHandoffs();
+  const routes = () => f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow'));
+  assert.equal(routes().length, 1);
+  assert.equal(f.handle.handoffStatus.bookingFlowsStarted, 1);
+  assert.ok(f.fields.crm_30x_booking_intent_hash);
+  await f.handle.synchronizeHandoffs();
+  assert.equal(routes().length, 1);
+  assert.equal(f.bookings().length, 0);
+});
+
+test('stale or declined booking intent never routes an unrelated reply', async () => {
+  for (const latestText of ['¿Cuánto cuesta el servicio?', 'no']) {
+    const f = fixture({ initial: { solicitud_agendamiento: 'si', texto_solicitud_agendamiento: 'sí' }, latestText });
+    await f.handle.synchronizeHandoffs();
+    assert.equal(f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow')).length, 0);
+  }
+});
+
+test('the observer leaves an active booking conversation in its current step', async () => {
+  const f = fixture({ initial: { solicitud_agendamiento: 'si', texto_solicitud_agendamiento: 'Sí, quiero agendar una llamada' } });
+  await prepareOptions(f);
+  await f.handle.synchronizeHandoffs();
+  assert.equal(f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow')).length, 0);
+});
+
+test('deferring the call stops the dialogue without reserving or demanding a keyword', async () => {
+  const f = fixture();
+  await prepareOptions(f);
+  const result = await f.request('step', 'por ahora no');
+  assert.equal(result.done, 'si');
+  assert.doesNotMatch(result.message, /AGENDAR/);
+  assert.equal(f.bookings().length, 0);
+});
+
+test('a direct natural request works without depending on a captured keyword', async () => {
+  const text = 'Quisiera agendar una llamada para revisar mi crédito';
+  const f = fixture({ initial: { 'last user freeform input': text }, latestText: text });
+  await f.handle.synchronizeHandoffs();
+  assert.equal(f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow')).length, 1);
+  assert.equal(f.bookings().length, 0);
+});
+
+test('natural routing waits for the assistant reply before starting the calendar dialogue', async () => {
+  const text = 'Quiero agendar una llamada';
+  const f = fixture({ initial: { 'last user freeform input': text }, latestText: text, botReplied: false });
+  await f.handle.synchronizeHandoffs();
+  assert.equal(f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow')).length, 0);
+});
