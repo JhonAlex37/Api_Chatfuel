@@ -11,5 +11,10 @@
     "start": "bun src/connector.mjs",
     "check": "node --check src/connector.mjs",
     "test": "node --test test/connector.test.mjs"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JhonAlex37/Api_Chatfuel.git"
+  },
+  "author": "JhonAlex37"
 }

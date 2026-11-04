@@ -6,10 +6,11 @@ trabaje en este proyecto. Los cambios futuros de Chatfuel se realizan aquí.
 
 - Leer README.md y docs/MIGRACION.md antes de cambiar el despliegue.
 - Ejecutar `npm run check`, `npm test` y `git diff --check` al cambiar el conector.
-- La cuenta solicitada por el usuario es su cuenta personal de Jhon Alexander;
-  verificar el login activo antes de publicar. Al preparar esta copia, GitHub
-  mostró JhonAlex37 y permiso READ sobre el repositorio. Registrar cambios
-  locales y comprobar el acceso efectivo antes de intentar publicar.
+- Publicar con la cuenta personal `JhonAlex37` en
+  `https://github.com/JhonAlex37/Api_Chatfuel`, rama `main`. La autoría y la
+  conexión de Railway a ese origen fueron verificadas. `Proyecta-SAS` es el
+  origen histórico del fork; los cambios de Chatfuel se publican en la cuenta
+  personal según la instrucción del usuario.
 - Los tokens y datos de clientes se guardan fuera de Git. No copiar .runtime,
   archivos DPAPI, documentos de clientes ni volcados del proyecto anterior.
 - Los simuladores no crean negociaciones ni citas. Una reserva real requiere

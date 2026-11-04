@@ -2,7 +2,7 @@
 
 Integración independiente de Chatfuel con las negociaciones de **30X** y el
 calendario de **Bitrix** para el piloto de reducción de crédito hipotecario.
-Repositorio: https://github.com/Proyecta-SAS/Api_Chatfuel
+Repositorio: https://github.com/JhonAlex37/Api_Chatfuel
 
 ## Funciones
 
@@ -29,7 +29,7 @@ test/connector.test.mjs            31 pruebas con servicios simulados
 config/chatfuel/rch-questions.json Preguntas y captura autorizadas
 docs/MIGRACION.md                  Cambio al proyecto nuevo de Railway
 Dockerfile                        Imagen de ejecución
-railway.json                      Configuración propia de Railway
+docs/RAILWAY.md                   Configuración del servicio independiente
 .env.example                      Nombres de variables, sin credenciales
 ```
 
@@ -86,10 +86,15 @@ en `bitrix_agenda_respuesta` y deriva al equipo cuando `human` es `si`.
 
 ## Estado de la separación
 
-La copia local está preparada. La conexión productiva conserva actualmente el
-servicio anterior de Railway hasta verificar y activar el proyecto nuevo.
-La publicación en GitHub requiere confirmar la cuenta y permiso de escritura.
-Ver [docs/MIGRACION.md](docs/MIGRACION.md) para el cambio completo.
+El código está publicado con la cuenta **JhonAlex37**, en este repositorio y
+su rama `main`. Railway está conectado a ese origen y despliega los cambios
+automáticamente. El servicio independiente usa
+`https://apichatfuel-production.up.railway.app`.
+
+Las dos acciones HTTP de la agenda de Chatfuel apuntan a ese dominio. El
+observador nuevo está activo; el anterior del proyecto DalIA quedó desactivado
+como respaldo de reversión. El motor original mantiene su configuración.
+Ver [docs/MIGRACION.md](docs/MIGRACION.md) y [docs/RAILWAY.md](docs/RAILWAY.md).
 
 Configuración de despliegue basada en las guías oficiales de
 [Bun con Docker](https://bun.com/guides/ecosystem/docker) y
