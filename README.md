@@ -99,3 +99,10 @@ Ver [docs/MIGRACION.md](docs/MIGRACION.md) y [docs/RAILWAY.md](docs/RAILWAY.md).
 Configuración de despliegue basada en las guías oficiales de
 [Bun con Docker](https://bun.com/guides/ecosystem/docker) y
 [Railway Config as Code](https://docs.railway.com/config-as-code/reference).
+
+## Configuración de conversación y pruebas
+
+La revisión de tono y el reinicio solicitado por el cliente están versionados
+en `config/chatfuel/rch-questions.json`. Su aplicación en Chatfuel es separada
+del despliegue de Railway. Ver [docs/PRUEBAS.md](docs/PRUEBAS.md) para iniciar
+una nueva revisión y verificar la reserva real en Bitrix.
