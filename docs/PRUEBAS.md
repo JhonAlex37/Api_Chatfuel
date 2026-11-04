@@ -1,6 +1,6 @@
 # Configuración de conversación y prueba de agenda
 
-La configuración `rch-questions-v5-2026-11-04` agrega un saludo amable al
+La configuración `rch-questions-v6-2026-11-04` agrega un saludo amable al
 retomar y una nueva revisión cuando el cliente pide empezar de cero. Mantiene
 el trato de usted, una pregunta por mensaje y el cuestionario RCH existente.
 El banco, la cobertura, el saldo pendiente en dinero, los años pagando y las
@@ -57,3 +57,9 @@ La amabilidad debe mantenerse en todas las respuestas: transiciones breves,
 una explicación sencilla del siguiente dato y ausencia de preguntas aisladas
 con tono de formulario. La pregunta de cobertura procede de P1 de la guía
 RCH de marketing; se reformuló para ser más cercana, conservando su significado.
+
+La versión 2.1.19 corrige la aceptación de una oferta de llamada cuando la IA
+guarda la intención como pendiente: exige que la pregunta inmediatamente
+anterior ofrezca organizar la llamada. Un sí al banco, nombre u otro dato no
+activa la agenda. Conserva la deduplicación y no crea una reserva al aceptar
+el ofrecimiento: primero hay que elegir y confirmar el horario.

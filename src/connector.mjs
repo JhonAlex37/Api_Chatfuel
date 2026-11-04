@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual, createHash } from 'node:crypto';
 
-export const RELEASE_VERSION = '2.1.18';
+export const RELEASE_VERSION = '2.1.19';
 
 const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa',
   'tipo_obligacion', 'banco_entidad', 'estado_pago', 'necesidad_principal',
@@ -101,6 +101,12 @@ function explicitBooking(value) {
     || /^(?:agendar(?:me)?|agendame|reservar(?:me)?|reservame)(?:\s+(?:una|la|mi))?(?:\s+(?:cita|llamada|horario|espacio))?[.!]*$/.test(text);
 }
 const confirmBooking = value => yes(value) || /^(claro(?: que si)?|dale|vale|listo|perfecto|por supuesto|esta bien|si por favor|confirmado)[.!\s]*$/.test(normalize(value));
+function offersBooking(value) {
+  const text = normalize(value);
+  if (!/[¿?]/.test(text) || /\b(?:no|nunca)\b[^?!.]{0,70}\b(?:agend|coordin|organiz|program|reserv)/.test(text)) return false;
+  return /\b(?:quiere|quieres|desea|deseas|le gustaria|te gustaria|podemos)\b[^?!.]{0,100}\b(?:agendar|coordinar|organizar|organicemos|agendemos|coordinemos|programar|reservar)\b[^?!.]{0,80}\b(?:llamada|cita)\b/.test(text)
+    || /\b(?:agendamos|coordinamos|organizamos|programamos|le agendo|te agendo)\b[^?!.]{0,80}\b(?:llamada|cita)\b/.test(text);
+}
 const PERIODS = [{ label: 'En la mañana', fromTime: '08:30', toTime: '12:00' },
   { label: 'En la tarde', fromTime: '12:00', toTime: '17:00' }];
 const dateAt = value => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value));
@@ -317,17 +323,25 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
           if (node.assignee?.__typename === 'FuelyAIAssignee') {
             const state = decode(fields.bitrix_agenda_estado, node.id);
             const active = state && ['name', 'city', 'active', 'period', 'day', 'choose', 'confirm', 'booking', 'confirmed', 'check_pending'].includes(state.step);
-            if ((!yes(fields.solicitud_agendamiento) && !explicitBooking(fields['last user freeform input']))
+            if ((!yes(fields.solicitud_agendamiento) && !explicitBooking(fields['last user freeform input']) && !confirmBooking(fields['last user freeform input']))
               || active || yes(fields.bitrix_reserva_pendiente) || !env.CHATFUEL_BOOKING_FLOW_ID) continue;
-            const current = await graphql('query NaturalBookingContext($botID:BotID!,$id:ConversationID!){bot(id:$botID){conversation(conversationID:$id){status messages(first:20){edges{node{__typename id ... on WhatsAppInTextMessage{text}}}}}}}', { botID, id: node.id });
+            const current = await graphql('query NaturalBookingContext($botID:BotID!,$id:ConversationID!){bot(id:$botID){conversation(conversationID:$id){status messages(first:20){edges{node{__typename id ... on WhatsAppInTextMessage{text} ... on WhatsAppOutTextMessage{text}}}}}}}', { botID, id: node.id });
             if (current.bot.conversation.status === 'open') continue;
             const messages = current.bot.conversation.messages.edges.map(edge => edge.node);
-            const incomingIndex = messages.findIndex(message => message.__typename === 'WhatsAppInTextMessage');
+            const incomingIndex = messages.findIndex(message => message.__typename.startsWith('WhatsAppIn'));
             const incoming = messages[incomingIndex];
             if (!messages.slice(0, incomingIndex).some(message => message.__typename.startsWith('WhatsAppOut'))) continue;
-            if (!incoming || declineBooking(incoming.text)) continue;
+            if (incoming?.__typename !== 'WhatsAppInTextMessage' || declineBooking(incoming.text)) continue;
             const evidence = value => normalize(value).replace(/[¿?¡!.,;:"'«»]/g, '').replace(/\s+/g, ' ').trim();
-            if ((!fields.texto_solicitud_agendamiento || evidence(incoming.text) !== evidence(fields.texto_solicitud_agendamiento)) && !explicitBooking(incoming.text)) continue;
+            const preceding = messages.slice(incomingIndex + 1).find(message =>
+              message.__typename.startsWith('WhatsAppIn') || message.__typename.startsWith('WhatsAppOut'));
+            const acceptedOffer = confirmBooking(incoming.text)
+              && preceding?.__typename === 'WhatsAppOutTextMessage' && offersBooking(preceding.text);
+            const capturedIntent = yes(fields.solicitud_agendamiento) && fields.texto_solicitud_agendamiento
+              && evidence(incoming.text) === evidence(fields.texto_solicitud_agendamiento);
+            // A bare yes needs the immediately preceding call offer, even if an
+            // AI-extracted attribute incorrectly classifies another answer as consent.
+            if (!explicitBooking(incoming.text) && !acceptedOffer && !(capturedIntent && !confirmBooking(incoming.text))) continue;
             const intentHash = createHash('sha256').update(`${node.id}|${incoming.id}`).digest('hex');
             if (fields.crm_30x_booking_intent_hash === intentHash) continue;
             const routed = await graphql('mutation NaturalBookingFlow($botID:BotID!,$id:ConversationID!,$flowID:FlowID!){conversationFinishSendToFlow(botID:$botID,conversationID:$id,flowID:$flowID){id status}}', { botID, id: node.id, flowID: env.CHATFUEL_BOOKING_FLOW_ID });

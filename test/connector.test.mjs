@@ -23,7 +23,7 @@ const SLOTS = [
 
 function fixture({ initial = {}, bookingError = null, invalidBooking = false,
   human = false, live = true, failLead = false, latestText = 'Sí, quiero agendar una llamada',
-  naturalStatus = 'closed', botReplied = true, staleHandoffIndex = false } = {}) {
+  naturalStatus = 'closed', botReplied = true, staleHandoffIndex = false, previousReply = '', olderMessages = [] } = {}) {
   const fields = { nombre_completo: 'Persona de Prueba', ciudad_municipio: 'Bogotá',
     obligacion_vivienda_activa: 'si', ...initial };
   const calls = [];
@@ -35,7 +35,7 @@ function fixture({ initial = {}, bookingError = null, invalidBooking = false,
     calls.push({ url, payload, headers: init.headers });
     if (url.endsWith('/graphql')) {
       if (payload.query.includes('query NaturalBookingContext')) return Response.json({ data: { bot: { conversation: {
-        status: naturalStatus, messages: { edges: [...(botReplied ? [{ node: { __typename: 'WhatsAppOutTextMessage', id: 'outgoing-1' } }] : []), { node: { __typename: 'WhatsAppInTextMessage', id: 'incoming-1', text: latestText } }] },
+        status: naturalStatus, messages: { edges: [...(botReplied ? [{ node: { __typename: 'WhatsAppOutTextMessage', id: 'outgoing-1' } }] : []), { node: { __typename: 'WhatsAppInTextMessage', id: 'incoming-1', text: latestText } }, ...(previousReply ? [{ node: { __typename: 'WhatsAppOutTextMessage', id: 'offer-1', text: previousReply } }] : []), ...olderMessages.map(node => ({ node }))] },
       } } } });
       if (payload.query.includes('mutation NaturalBookingFlow')) return Response.json({ data: {
         conversationFinishSendToFlow: { id: CONTACT, status: 'closed' },
@@ -439,4 +439,47 @@ test('natural routing waits for the assistant reply before starting the calendar
   const f = fixture({ initial: { 'last user freeform input': text }, latestText: text, botReplied: false });
   await f.handle.synchronizeHandoffs();
   assert.equal(f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow')).length, 0);
+});
+
+
+test('a yes to the actual call offer routes once when AI intent extraction stays pending', async () => {
+  const f = fixture({ initial: { 'last user freeform input': 'si', solicitud_agendamiento: 'PENDIENTE', texto_solicitud_agendamiento: 'PENDIENTE' }, latestText: 'si',
+    previousReply: 'Gracias. Resumen del caso. ¿Está correcto y quiere que organicemos una llamada con un asesor?' });
+  await f.handle.synchronizeHandoffs();
+  await f.handle.synchronizeHandoffs();
+  assert.equal(f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow')).length, 1);
+  assert.equal(f.bookings().length, 0);
+});
+
+test('a yes to profile data never starts booking even if AI attributes incorrectly say yes', async () => {
+  for (const previousReply of ['¿Tiene un crédito activo?', '¿Su nombre está correcto?', '¿Estos datos están correctos?', '¿Tiene cobertura Mi Casa Ya?']) {
+    const f = fixture({ initial: { 'last user freeform input': 'si', solicitud_agendamiento: 'SI', texto_solicitud_agendamiento: 'si' }, latestText: 'si', previousReply });
+    await f.handle.synchronizeHandoffs();
+    assert.equal(f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow')).length, 0);
+    assert.equal(f.bookings().length, 0);
+  }
+});
+
+test('an older call offer cannot authorize a yes to a newer unrelated question', async () => {
+  const f = fixture({ initial: { 'last user freeform input': 'si' }, latestText: 'si', previousReply: '¿Su banco es BBVA?',
+    olderMessages: [{ __typename: 'WhatsAppOutTextMessage', id: 'older-offer', text: '¿Quiere que organicemos una llamada con un asesor?' }] });
+  await f.handle.synchronizeHandoffs();
+  assert.equal(f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow')).length, 0);
+});
+
+test('declined or conditional answers to a call offer cannot start the booking flow', async () => {
+  for (const latestText of ['no', 'por ahora no', 'si puedo', 'tal vez']) {
+    const f = fixture({ initial: { 'last user freeform input': latestText }, latestText, previousReply: '¿Quiere que organicemos una llamada con un asesor?' });
+    await f.handle.synchronizeHandoffs();
+    assert.equal(f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow')).length, 0);
+    assert.equal(f.bookings().length, 0);
+  }
+});
+
+test('contextual consent still waits for the current assistant reply and leaves live chats alone', async () => {
+  for (const config of [{ botReplied: false }, { naturalStatus: 'open' }]) {
+    const f = fixture({ initial: { 'last user freeform input': 'si' }, latestText: 'si', previousReply: '¿Quiere que organicemos una llamada con un asesor?', ...config });
+    await f.handle.synchronizeHandoffs();
+    assert.equal(f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow')).length, 0);
+  }
 });

@@ -15,8 +15,9 @@ Repositorio: https://github.com/JhonAlex37/Api_Chatfuel
   evento creado y controla reintentos y comentarios repetidos.
 - Escucha cambios de chats mediante WebSocket y recupera pendientes al conectar.
 
-Versión actual: **2.1.18**. Los mensajes de agenda incorporan emojis en la
-selección y confirmación de horarios; la lógica de reservas se conserva.
+Versión actual: **2.1.19**. La agenda reconoce un «sí» a la oferta inmediatamente
+anterior aunque la extracción de intención de la IA quede pendiente. Los mensajes
+de agenda incorporan emojis; la reserva exige elegir y confirmar un horario.
 El motor original de DalIA conserva sus preguntas y scoring. El scoring nuevo
 de Chatfuel de 0 a 100 sigue pendiente. La reserva real completa por WhatsApp
 también está pendiente de verificación.
@@ -25,7 +26,7 @@ también está pendiente de verificación.
 
 ```text
 src/connector.mjs                  Servicio Bun independiente
-test/connector.test.mjs            31 pruebas con servicios simulados
+test/connector.test.mjs            36 pruebas con servicios simulados
 config/chatfuel/rch-questions.json Preguntas y captura autorizadas
 docs/MIGRACION.md                  Cambio al proyecto nuevo de Railway
 Dockerfile                        Imagen de ejecución
