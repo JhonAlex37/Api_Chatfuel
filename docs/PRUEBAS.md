@@ -1,6 +1,6 @@
 # Configuración de conversación y prueba de agenda
 
-La configuración `rch-questions-v4-2026-11-04` agrega un saludo amable al
+La configuración `rch-questions-v5-2026-11-04` agrega un saludo amable al
 retomar y una nueva revisión cuando el cliente pide empezar de cero. Mantiene
 el trato de usted, una pregunta por mensaje y el cuestionario RCH existente.
 El banco, la cobertura, el saldo pendiente en dinero, los años pagando y las
@@ -52,3 +52,8 @@ El prompt pide emojis pertinentes en saludos, agradecimientos y transiciones,
 sin recargar los mensajes. El conector 2.1.18 los incorpora al ofrecer días
 y horarios y al confirmar la reserva. Los mensajes de dificultad mantienen
 un tono sobrio.
+
+La amabilidad debe mantenerse en todas las respuestas: transiciones breves,
+una explicación sencilla del siguiente dato y ausencia de preguntas aisladas
+con tono de formulario. La pregunta de cobertura procede de P1 de la guía
+RCH de marketing; se reformuló para ser más cercana, conservando su significado.
