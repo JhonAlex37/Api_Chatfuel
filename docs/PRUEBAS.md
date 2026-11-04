@@ -1,6 +1,6 @@
 # Configuración de conversación y prueba de agenda
 
-La configuración `rch-questions-v3-2026-11-04` agrega un saludo amable al
+La configuración `rch-questions-v4-2026-11-04` agrega un saludo amable al
 retomar y una nueva revisión cuando el cliente pide empezar de cero. Mantiene
 el trato de usted, una pregunta por mensaje y el cuestionario RCH existente.
 El banco, la cobertura, el saldo pendiente en dinero, los años pagando y las
@@ -47,3 +47,8 @@ Una reserva incierta necesita verificación antes de intentar otra.
 
 El scoring nuevo de Chatfuel sigue pendiente. El motor y scoring original
 de DalIA no forman parte de este cambio.
+
+El prompt pide emojis pertinentes en saludos, agradecimientos y transiciones,
+sin recargar los mensajes. El conector 2.1.18 los incorpora al ofrecer días
+y horarios y al confirmar la reserva. Los mensajes de dificultad mantienen
+un tono sobrio.

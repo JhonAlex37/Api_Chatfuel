@@ -1,7 +1,7 @@
 {
-  "version": "2.1.17",
+  "version": "2.1.18",
   "component": "api-chatfuel",
-  "connector_sha256": "b9d86c4a6531a1daede525f46d9413f298523f8ccfc4f270576edda31be29ece",
+  "connector_sha256": "00ff0cc9b9433a1981942fd2b9d4b2643d47462222e1c18e80163cb51cefe1c4",
   "source_repository": "https://github.com/JhonAlex37/Api_Chatfuel",
   "extracted_from_commit": "bcd5a9693326ae590b1602ad89a3fa2703608991",
   "tests_expected": 31,
@@ -17,5 +17,6 @@
   "deployment_service_id": "b15812dd-8735-45f3-9e31-086c4862c50b",
   "deployment_url": "https://apichatfuel-production.up.railway.app",
   "old_handoff_listener_enabled": false,
-  "new_handoff_listener_enabled": true
+  "new_handoff_listener_enabled": true,
+  "chatfuel_configuration_version": "rch-questions-v4-2026-11-04"
 }

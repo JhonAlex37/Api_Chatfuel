@@ -15,8 +15,8 @@ Repositorio: https://github.com/JhonAlex37/Api_Chatfuel
   evento creado y controla reintentos y comentarios repetidos.
 - Escucha cambios de chats mediante WebSocket y recupera pendientes al conectar.
 
-Versión extraída: **2.1.17**. El código del conector se conserva idéntico al
-verificado en producción; este repositorio incorpora su propio despliegue.
+Versión actual: **2.1.18**. Los mensajes de agenda incorporan emojis en la
+selección y confirmación de horarios; la lógica de reservas se conserva.
 El motor original de DalIA conserva sus preguntas y scoring. El scoring nuevo
 de Chatfuel de 0 a 100 sigue pendiente. La reserva real completa por WhatsApp
 también está pendiente de verificación.

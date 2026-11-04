@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual, createHash } from 'node:crypto';
 
-export const RELEASE_VERSION = '2.1.17';
+export const RELEASE_VERSION = '2.1.18';
 
 const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa',
   'tipo_obligacion', 'banco_entidad', 'estado_pago', 'necesidad_principal',
@@ -241,7 +241,7 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
   }
   function askPeriod(contactId, clientCode, { date, intro = '' } = {}) {
     return reply(contactId, { step: 'period', clientCode, ...(date ? { date } : {}) },
-      `${intro ? intro + '\n\n' : 'Vamos a coordinar una llamada de 10 minutos con el asesor.\n\n'}${date ? `Para el ${dayLabel(date)}, ¿prefieres` : '¿Prefieres'} el contacto en la mañana o en la tarde?`);
+      `${intro ? intro + '\n\n' : 'Con gusto coordinamos una llamada de 10 minutos con un asesor 🗓️.\n\n'}${date ? `Para el ${dayLabel(date)}, ¿prefieres` : '¿Prefieres'} el contacto en la mañana o en la tarde?`);
   }
   async function offerDays(contactId, clientCode, window) {
     let from = dateAt(now());
@@ -252,7 +252,7 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
     const days = [...new Set(slots.map(slot => dateAt(slot.startAt)))].slice(0, 2);
     if (!days.length) return askPeriod(contactId, clientCode, { intro: 'No encontré días libres en esa franja. Podemos revisar la otra franja o solicitar ayuda a un asesor.' });
     return reply(contactId, { step: 'day', clientCode, days, ...window },
-      `¿Qué día prefieres para el contacto con un asesor?\n\n${days.map((date, index) => `${index + 1}. ${dayLabel(date)}`).join('\n')}\n\nPuedes responder con el día o con el número.`);
+      `🗓️ ¿Qué día prefieres para el contacto con un asesor?\n\n${days.map((date, index) => `${index + 1}. ${dayLabel(date)}`).join('\n')}\n\nPuedes responder con el día o con el número.`);
   }
   async function offerTimes(contactId, state, date, excluded = []) {
     const window = { fromTime: state.fromTime || '08:30', toTime: state.toTime || '17:00' };
@@ -262,7 +262,7 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
       excludedStarts: [...new Set([...excluded, ...slots.map(slot => slot.startAt)])] };
     if (!slots.length) return reply(contactId, context, 'No encontré otros horarios libres en ese día y franja. ¿Prefieres otro día u otra franja?');
     return reply(contactId, context,
-      `Estos son los horarios libres para el ${dayLabel(date)} (hora de Colombia):\n\n${slots.map((slot, index) => `${index + 1}. ${timeAt(slot.startAt)}`).join('\n')}\n\n¿Cuál te sirve? Puedes decir el horario, «la primera» o el número. También podemos revisar otro día u otra franja.`);
+      `🕒 Estos son los horarios libres para el ${dayLabel(date)} (hora de Colombia):\n\n${slots.map((slot, index) => `${index + 1}. ${timeAt(slot.startAt)}`).join('\n')}\n\n¿Cuál te sirve? Puedes decir el horario, «la primera» o el número. También podemos revisar otro día u otra franja.`);
   }
   async function options(contactId, clientCode, excluded = [], context = {}) {
     if (context.date) return offerTimes(contactId, { ...context, clientCode }, context.date, excluded);
@@ -463,7 +463,7 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
         if (index === null) return reply(contactId, state, '¿Cuál de los horarios ofrecidos te sirve? Puedes responder con la hora, el número o decir, por ejemplo, «la primera». También podemos revisar otro día u otra franja.');
         const slot = state.slots[index];
         return reply(contactId, { ...state, step: 'confirm', slot },
-          `Elegiste ${label(slot)} (hora de Colombia), para una llamada de 10 minutos. ¿Confirmas que reserve ese horario? Responde SÍ o CANCELAR.`);
+          `🗓️ Elegiste ${label(slot)} (hora de Colombia), para una llamada de 10 minutos. ¿Confirmas que reserve ese horario? Responde SÍ o CANCELAR.`);
       }
       if (state.step === 'confirm' || state.step === 'booking') {
         if (state.step === 'confirm' && !confirmBooking(answer)) return reply(contactId, state, '¿Confirmas que reserve el horario elegido? Si prefieres dejarlo pendiente, también me lo puedes decir.');
@@ -482,7 +482,7 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
             || Date.parse(booking.endAt) - Date.parse(booking.startAt) !== 600_000) throw new Error('INVALID_BOOKING_CONFIRMATION');
           return reply(contactId, { step: 'confirmed', clientCode: state.clientCode,
             slot: state.slot, bitrixEventId: String(booking.bitrixEventId), appointmentId: booking.appointmentId },
-          `Tu llamada quedó agendada para ${label(state.slot)} (hora de Colombia). Duración: 10 minutos. Te esperamos; si necesitas revisarla, escríbenos por este mismo chat.`,
+          `✅ Tu llamada quedó agendada para ${label(state.slot)} (hora de Colombia). Duración: 10 minutos. Te esperamos; si necesitas revisarla, escríbenos por este mismo chat.`,
           { done: true, fields: { bitrix_reserva_pendiente: 'no', bitrix_evento_id: booking.bitrixEventId, bitrix_cita_id: booking.appointmentId,
             bitrix_cita_inicio: booking.startAt, crm_30x_codigo: state.clientCode } });
         } catch (error) {
