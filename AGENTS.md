@@ -17,3 +17,11 @@ trabaje en este proyecto. Los cambios futuros de Chatfuel se realizan aquí.
   elección del cliente y confirmación técnica de Bitrix.
 - Al migrar, preparar el servicio nuevo con HANDOFF_SYNC_ENABLED=false y
   coordinar el cambio de URLs y del observador para evitar procesamiento doble.
+
+## Publicaciones
+
+Por preferencia expresa del usuario, escribir los mensajes de commit y las
+etiquetas de versión en español, con versión y descripción breve. Formato:
+`V2.1.19: Corrige la aceptación de llamadas para abrir la agenda de Bitrix`.
+Mantener la secuencia de versiones existente y asociar la etiqueta `Vx.y.z`
+a la revisión publicada. No reescribir commits que ya se compartieron.
