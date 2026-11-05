@@ -9,11 +9,16 @@ export function readConfig(env = process.env) {
     throw new Error('BITRIX_WEBHOOK_URL debe ser https://portal/rest/usuario/webhook/.');
   }
   const port = Number(env.PORT || 3000);
+  const calendar = new URL(env.BITRIX_CALENDAR_WEBHOOK_URL || bitrix.href);
+  if (calendar.protocol !== 'https:' || calendar.host !== bitrix.host
+    || !/^\/rest\/\d+\/[^/]+\/?$/.test(calendar.pathname) || calendar.search || calendar.hash
+    || calendar.username || calendar.password) throw new Error('Webhook de calendario Bitrix inválido.');
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT inválido.');
   return {
     port,
     mysqlUrl: env.MYSQL_URL,
     bitrixUrl: bitrix.href.replace(/\/?$/, '/'),
+    calendarUrl: calendar.href.replace(/\/?$/, '/'),
     webhookToken: env.REGISTRAR_CLIENTE_TOKEN || '',
   };
 }

@@ -1,6 +1,8 @@
 # Api_Chatfuel
 
-Este repositorio contiene exclusivamente la integración Chatfuel / 30X / Bitrix.
+Este repositorio contiene exclusivamente la integración Chatfuel / MySQL / Bitrix.
+La agenda es propia: no reintroducir dependencias de API, base de datos o archivos
+de AI-First-One. La carpeta de referencia es temporal y está excluida de Git.
 Conservar las preguntas y el scoring del motor original de DalIA cuando se
 trabaje en este proyecto. Los cambios futuros de Chatfuel se realizan aquí.
 

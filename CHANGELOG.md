@@ -1,3 +1,12 @@
+# V1.0.6 - 2026-11-05
+
+- Integra perfiles y agenda en este servicio con Bitrix directo y MySQL propio.
+- Elimina llamadas y credenciales obligatorias de la API externa AI-First-One.
+- Conserva asesores, horarios, confirmación y vínculo de negociación a C370:EXECUTING.
+- Persiste reservas pendientes antes de enviar y recupera respuestas perdidas sin duplicar eventos.
+- Migra perfiles y citas existentes; protege reservas antiguas inciertas.
+- Excluye la carpeta de referencia de Git, pruebas y construcción.
+
 # V1.0.5 - 2026-11-05
 
 - Reintenta hasta tres veces las consultas seguras ante fallos temporales, con un máximo de ocho segundos por consulta.

@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual, createHash } from 'node:crypto';
 
-export const RELEASE_VERSION = '1.0.5';
+export const RELEASE_VERSION = '1.0.6';
 
 const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa',
   'tipo_obligacion', 'banco_entidad', 'estado_pago', 'necesidad_principal',
@@ -159,12 +159,11 @@ function selectedDay(value, days, now) {
 }
 const json = (data, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
 
-export function createHandler({ env = process.env, fetchImpl = fetch, now = () => Date.now(), database = null } = {}) {
+export function createHandler({ env = process.env, fetchImpl = fetch, now = () => Date.now(), database = null, scheduling = null } = {}) {
   const botID = env.CHATFUEL_BOT_ID;
   const secret = env.CHATFUEL_BOOKING_SECRET;
-  const crmBase = env.AI_FIRST_ONE_BASE_URL;
   const configured = Boolean(botID && secret?.length >= 32 && env.CHATFUEL_API_TOKEN
-    && crmBase?.startsWith('https://') && env.AI_FIRST_ONE_APPOINTMENTS_TOKEN);
+    && scheduling?.request);
   const handoffStatus = { enabled: env.HANDOFF_SYNC_ENABLED === 'true', connected: false,
     lastSyncAt: null, synchronized: 0, bookingFlowsStarted: 0, lastError: null,
     incomingRecoveryEnabled: env.INCOMING_RECOVERY_ENABLED === 'true', incomingRecovered: 0,
@@ -178,7 +177,7 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
   const incomingRecoveryAttempts = new Map();
   const mac = data => createHmac('sha256', secret).update(data).digest('base64url');
   function encode(contactId, state) {
-    const payload = Buffer.from(JSON.stringify({ ...state, contactId, expires: now() + 30 * 60_000 })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ ...state, engine: 'local-v1', contactId, expires: now() + 30 * 60_000 })).toString('base64url');
     return `${payload}.${mac(payload)}`;
   }
   function decode(token, contactId) {
@@ -236,23 +235,9 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
     const deadline = Date.now() + 8000;
     for (let attempt = 0; ; attempt++) {
       try {
-        const response = await fetchImpl(`${crmBase.replace(/\/$/, '')}${path}`, {
-          method: 'POST', signal: AbortSignal.timeout(canRetry ? Math.max(1, Math.min(3000, deadline - Date.now())) : 15_000),
-          headers: { Authorization: `Bearer ${env.AI_FIRST_ONE_APPOINTMENTS_TOKEN}`, 'Content-Type': 'application/json',
-            ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
-          body: JSON.stringify(body),
-        });
-        const result = await response.json().catch(() => null);
-        if (!response.ok || result?.ok !== true) {
-          const code = response.status === 401 || response.status === 403 ? 'CRM_UNAUTHORIZED'
-            : response.status === 409 && result?.error?.code === 'SLOT_UNAVAILABLE' ? 'SLOT_UNAVAILABLE'
-            : response.ok && !result ? 'CRM_INVALID_RESPONSE' : 'CRM_UNAVAILABLE';
-          const retryAfter = Number(response.headers.get('retry-after'));
-          throw Object.assign(new Error(code), {
-            retryable: response.status === 408 || response.status === 429 || response.status >= 500 || (response.ok && !result),
-            retryAfterMs: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0,
-          });
-        }
+        // In-process service: no HTTP request, token or dependency on another CRM.
+        const result = await scheduling.request(path, body, idempotencyKey);
+        if (result?.ok !== true) throw new Error('CRM_INVALID_RESPONSE');
         return result;
       } catch (error) {
         const delayMs = Math.max(250 * (attempt + 1), error.retryAfterMs || 0);
@@ -487,7 +472,7 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
   const handle = async function handle(request) {
     const url = new URL(request.url);
     if (url.pathname === '/health' && request.method === 'GET') return json({ ok: configured,
-      service: 'chatfuel-bitrix-booking', version: RELEASE_VERSION, handoff: { ...handoffStatus } }, configured ? 200 : 503);
+      service: 'chatfuel-bitrix-booking', version: RELEASE_VERSION, calendar: { provider: 'bitrix', storage: 'mysql', independent: true }, handoff: { ...handoffStatus } }, configured ? 200 : 503);
     if (!['/booking', '/sync-handoffs'].includes(url.pathname) || request.method !== 'POST') return json({ error: 'NOT_FOUND' }, 404);
     if (!configured) return json({ error: 'NOT_CONFIGURED' }, 503);
     if (!same(request.headers.get('authorization') ?? '', `Bearer ${secret}`)) return json({ error: 'UNAUTHORIZED' }, 401);
@@ -507,7 +492,13 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
     const run = async () => {
       const { phone, fields } = await contact(contactId);
       const answer = String(fields.bitrix_agenda_respuesta ?? '').trim();
-      const state = decode(fields.bitrix_agenda_estado, contactId);
+      let state = decode(fields.bitrix_agenda_estado, contactId);
+      // Safely bring an old selection/profile into the local store. A reservation
+      // already sent to the former engine must instead be reconciled by its key.
+      if (state?.clientCode && state.engine !== 'local-v1' && !['booking', 'confirmed', 'check_pending'].includes(state.step)) {
+        const clientCode = await upsertLead(contactId, phone, { ...fields, crm_30x_codigo: state.clientCode });
+        state = { ...state, clientCode };
+      }
       bookingMayExist = yes(fields.bitrix_reserva_pendiente) || ['booking', 'confirmed', 'check_pending'].includes(state?.step);
       if (state?.step === 'confirmed') {
         // Retrying a stage update must never request another calendar event.
@@ -608,13 +599,15 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
           }
         }
         const key = `chatfuel-${createHash('sha256').update(`${contactId}|${state.clientCode}|${state.slot.startAt}|${state.slot.advisorId}`).digest('hex')}`;
+        const legacyPending = state.legacyPending === true || (state.step === 'booking' && state.engine !== 'local-v1');
         bookingMayExist = true;
         await setAttributes(contactId, { bitrix_reserva_pendiente: 'si',
-          bitrix_agenda_estado: encode(contactId, { ...state, step: 'booking', bookingDealId }) });
+          bitrix_agenda_estado: encode(contactId, { ...state, step: 'booking', bookingDealId, legacyPending }) });
         try {
           const result = await crm(`/api/v1/leads/${encodeURIComponent(state.clientCode)}/appointments`, {
             startAt: state.slot.startAt, durationMinutes: 10, advisorId: state.slot.advisorId,
             advisorPool: true, idempotencyKey: key,
+            ...(legacyPending ? { resumeOnly: true } : {}),
             ...(bookingDealId ? { bitrixDealId: bookingDealId, bitrixStageId: 'C370:EXECUTING' } : {}),
           }, key);
           const booking = result.data;
@@ -718,10 +711,4 @@ export function startHandoffListener(handler, { env = process.env, WebSocketImpl
     for (const timer of [reconnectTimer, heartbeat, retryTimer]) if (timer) cancelDelay(timer);
     socket?.close();
   };
-}
-
-if (globalThis.Bun && import.meta.main) {
-  const handler = createHandler({ env: Bun.env });
-  Bun.serve({ port: Number(Bun.env.PORT || 3000), fetch: handler });
-  if (Bun.env.HANDOFF_SYNC_ENABLED === 'true') startHandoffListener(handler, { env: Bun.env });
 }

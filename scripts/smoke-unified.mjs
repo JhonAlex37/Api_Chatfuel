@@ -8,9 +8,8 @@ import { schemaUrl } from '../src/database.js';
 assert.equal(typeof WebSocket, 'function');
 assert.match(await readFile(schemaUrl, 'utf8'), /clientes/);
 const secret = 'clave-local-simulada-para-comprobar-la-imagen-12345';
-const handler = createHandler({ env: {
+const handler = createHandler({ scheduling: { request: async () => { throw new Error('No calendar calls expected'); } }, env: {
   CHATFUEL_BOT_ID: 'simulado', CHATFUEL_API_TOKEN: 'simulado', CHATFUEL_BOOKING_SECRET: secret,
-  AI_FIRST_ONE_BASE_URL: 'https://example.invalid', AI_FIRST_ONE_APPOINTMENTS_TOKEN: 'simulado',
 }, fetchImpl: async () => { throw new Error('No se permiten conexiones externas'); } });
 let stored = 0;
 const server = createApp({ bookingHandler: handler, logger: { error() {} },
@@ -22,7 +21,7 @@ await once(server, 'listening');
 const base = `http://127.0.0.1:${server.address().port}`;
 try {
   const health = await (await fetch(`${base}/health`)).json();
-  assert.equal(health.version, '1.0.4');
+  assert.equal(health.version, '1.0.6');
   assert.equal(health.mysql.ok, true);
   assert.equal((await fetch(`${base}/registrar-cliente?id=123`)).status, 200);
   assert.equal(stored, 1);

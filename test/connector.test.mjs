@@ -90,8 +90,15 @@ function fixture({ initial = {}, bookingError = null, invalidBooking = false,
     throw new Error(`Unexpected mocked endpoint: ${url}`);
   };
   const handle = createHandler({ env: { CHATFUEL_BOT_ID: 'mock-bot', CHATFUEL_BOOKING_SECRET: SECRET,
-    CHATFUEL_API_TOKEN: 'mock-chatfuel-token', AI_FIRST_ONE_BASE_URL: 'https://crm.mock.invalid',
-    AI_FIRST_ONE_APPOINTMENTS_TOKEN: 'mock-crm-token', CHATFUEL_BOOKING_FLOW_ID: 'mock-flow' }, fetchImpl: mockFetch, now: () => time, database });
+    CHATFUEL_API_TOKEN: 'mock-chatfuel-token', CHATFUEL_BOOKING_FLOW_ID: 'mock-flow' }, fetchImpl: mockFetch, now: () => time, database, scheduling: { request: async (path, body, key) => {
+      const response = await mockFetch('local:' + path, { body: JSON.stringify(body), headers: { 'Idempotency-Key': key } });
+      const result = await response.json();
+      if (!response.ok || result.ok !== true) throw Object.assign(new Error(
+        response.status === 401 || response.status === 403 ? 'CRM_UNAUTHORIZED'
+        : response.status === 409 && result.error?.code === 'SLOT_UNAVAILABLE' ? 'SLOT_UNAVAILABLE' : 'CRM_UNAVAILABLE'),
+        { retryable: response.status >= 500 || response.status === 429 });
+      return result;
+    } } });
   const request = async (operation = 'step', answer, extras = {}) => {
     if (answer !== undefined) fields.bitrix_agenda_respuesta = answer;
     const response = await handle(new Request('https://connector.mock.invalid/booking', { method: 'POST',
@@ -528,7 +535,7 @@ test('asking for a person during booking exits toward human attention without re
 test('new CRM negotiations resolve through the enabled advisor rotation before profile upsert', async () => {
   const f = fixture({ human: 'shared' });
   await f.handle.synchronizeHandoffs();
-  const crmCalls = f.calls.filter(c => c.url.includes('crm.mock'));
+  const crmCalls = f.calls.filter(c => c.url.startsWith('local:'));
   assert.ok(crmCalls[0].url.endsWith('/leads/resolve'));
   assert.equal(crmCalls[1].payload.externalLeadId, 'CLI-MOCK-ONLY');
 });

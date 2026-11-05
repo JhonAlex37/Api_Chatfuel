@@ -43,10 +43,9 @@ function fixture({ enabled = true, external = true, status = 'automated', contac
     if (query.includes('query HandoffState')) return Response.json({ data: { bot: { conversation: { status: 'automated' } } } });
     throw new Error('Operación inesperada en la prueba de recuperación');
   };
-  const handler = createHandler({ now: () => NOW, fetchImpl, env: {
+  const handler = createHandler({ scheduling: { request: async () => { throw new Error('No calendar calls expected'); } }, now: () => NOW, fetchImpl, env: {
     CHATFUEL_BOT_ID: 'bot-simulado', CHATFUEL_API_TOKEN: 'token-simulado',
     CHATFUEL_BOOKING_SECRET: 'clave-simulada-de-mas-de-treinta-y-dos-caracteres',
-    AI_FIRST_ONE_BASE_URL: 'https://crm.example.invalid', AI_FIRST_ONE_APPOINTMENTS_TOKEN: 'token-simulado',
     INCOMING_RECOVERY_ENABLED: String(enabled),
   } });
   const count = operation => calls.filter(call => call.payload.query.includes(operation)).length;

@@ -1,141 +1,90 @@
-# Api_Chatfuel
+# Api_Chatfuel — V1.0.6
 
-Integración independiente de Chatfuel con las negociaciones de **30X** y el
-calendario de **Bitrix** para el piloto de reducción de crédito hipotecario.
-Repositorio: https://github.com/JhonAlex37/Api_Chatfuel
+Servicio propio de Chatfuel con **MySQL y conexión directa a Bitrix24**.
+El registro, perfiles, disponibilidad, reservas y cambios de etapa se resuelven
+en este proyecto. No necesita la API, base de datos ni carpeta de AI-First-One.
+
+```text
+WhatsApp → Chatfuel → Api_Chatfuel → Bitrix24
+                          ↓
+                        MySQL
+```
 
 ## Funciones
 
-- Recoge las respuestas guardadas por Chatfuel y crea o actualiza la misma
-  negociación al pasar al asesor o iniciar el agendamiento.
-- Envía un comentario legible con banco, cobertura, saldo pendiente en pesos,
-  tiempo pagando, cuotas vencidas, datos pendientes y motivo de atención.
-- Consulta disponibilidad real de Bitrix: franja, dos días y tres horarios.
-- Reserva una llamada de diez minutos con confirmación explícita, valida el
-  evento creado y controla reintentos y comentarios repetidos.
-- Escucha cambios de chats mediante WebSocket y recupera pendientes al conectar.
+- `/registrar-cliente?id=...` consulta la negociación y guarda su contacto en MySQL.
+- Conserva el consentimiento, franja, dos días y hasta tres horarios separados.
+- Consulta `calendar.accessibility.get` y reparte llamadas de diez minutos según disponibilidad y carga.
+- Busca la negociación por teléfono completo en `clientes` antes de reservar.
+- Crea el evento con `calendar.event.add` y `crm_fields: ["D_ID"]` si encuentra una coincidencia.
+- Guarda la cita confirmada antes de mover la negociación a `C370:EXECUTING`.
+- Sin registro del teléfono, reserva sin vincular ni cambiar negociaciones.
+- Persiste la reserva pendiente antes de llamar a Bitrix; recupera respuestas perdidas sin crear otro evento.
+- Conserva la atención por IA, transferencias a humanos y recuperación de mensajes sin asignar.
 
-Versión actual: **1.0.5**. Las consultas seguras reintentan fallos temporales hasta tres veces, durante un máximo de ocho segundos. Un error antes de reservar conserva los datos y permite retomar sin anunciar una cita pendiente. Las reservas inciertas mantienen su verificación e idempotencia.
+El perfil y resumen se guardan localmente. Una negociación registrada recibe su
+resumen en Bitrix con deduplicación. No se modifican las preguntas ni el scoring
+del motor original; el nuevo scoring de 0 a 100 sigue fuera de alcance.
 
-Antes de reservar, consulta el teléfono en MySQL y vincula la negociación encontrada al calendario. Después de confirmar la cita solicita `C370:EXECUTING`; sin coincidencia conserva el flujo anterior. Ver [vinculación de citas](docs/VINCULACION-CITAS.md).
+## Ejecutar
 
-Con `INCOMING_RECOVERY_ENABLED=true`, el observador
-recupera mensajes entrantes recientes que siguen sin IA asignada en etapa Nueva.
-Si otro proveedor conserva el control, primero toma la conversación y después
-la entrega a la IA. Requiere que Meta conceda a Chatfuel control y visibilidad.
-No interviene en chats abiertos con humanos, perfiles avanzados ni reservas.
-La agenda evita iniciar dos veces el mismo diálogo
-cuando Chatfuel devuelve una búsqueda de contactos atrasada. El diagnóstico HTTP
-registra operación, etapa y duración, sin mensajes, teléfonos ni credenciales.
-La agenda reconoce un «sí» a la oferta inmediatamente
-anterior aunque la extracción de intención de la IA quede pendiente. Los mensajes
-de agenda incorporan emojis; la reserva exige elegir y confirmar un horario.
-El motor original de DalIA conserva sus preguntas y scoring. El scoring nuevo
-de Chatfuel de 0 a 100 sigue pendiente. La reserva real completa por WhatsApp
-también está pendiente de verificación.
-
-## Estructura
-
-```text
-src/connector.mjs                  Servicio Bun independiente
-test/connector.test.mjs            39 pruebas con servicios simulados
-config/chatfuel/rch-questions.json Preguntas y captura autorizadas
-docs/MIGRACION.md                  Cambio al proyecto nuevo de Railway
-Dockerfile                        Imagen de ejecución
-docs/RAILWAY.md                   Configuración del servicio independiente
-.env.example                      Nombres de variables, sin credenciales
-```
-
-## Ejecutar las pruebas
-
-Requiere Node.js 24 o superior. La API usa Node.js 24 y mysql2. Instalar las dependencias con `npm ci` antes
-de ejecutar las pruebas. Los registros y reservas de las pruebas usan simuladores.
+Node.js 24 o superior y MySQL. Copiar `.env.example` a `.env` y completar valores.
 
 ```powershell
+npm ci
 npm run check
 npm test
+npm start
 ```
 
-Para ejecutar la API local, copiar `.env.example` a `.env`, completar las
-variables y ejecutar `npm start`. MySQL debe estar disponible por su URL. Con Docker, construir
-`docker build -t api-chatfuel .` y ejecutar
-`docker run --rm --env-file .env -p 3000:3000 api-chatfuel`.
-Las variables completas son necesarias para que `/health` devuelva 200.
+Las tablas se crean al arrancar de forma idempotente; no se elimina `clientes`.
+Para probar persistencia y concurrencia, definir `TEST_MYSQL_URL` con una instancia
+**de prueba** y ejecutar `npm test`. Se crean bases aleatorias y se eliminan al terminar.
+La suite simula Bitrix y Chatfuel: no crea citas ni envía WhatsApp reales.
 
-Después de construir la imagen, `./scripts/smoke-docker.ps1` comprueba arranque,
-salud, previsualización y autenticación usando credenciales ficticias. Detiene
-el contenedor de prueba al terminar; no envía mensajes ni crea registros reales.
-
-## Configuración
+## Variables
 
 | Variable | Uso |
 | --- | --- |
-| `CHATFUEL_BOT_ID` | Bot que se atiende |
-| `CHATFUEL_API_TOKEN` | Token del usuario virtual Editor del bot |
-| `CHATFUEL_BOOKING_SECRET` | Secreto compartido de al menos 32 caracteres |
-| `AI_FIRST_ONE_BASE_URL` | URL HTTPS de la API de 30X |
-| `AI_FIRST_ONE_APPOINTMENTS_TOKEN` | Credencial de la API de agenda/negociaciones |
-| `CHATFUEL_BOOKING_FLOW_ID` | Flujo de agenda de Chatfuel |
+| `MYSQL_URL` | MySQL propio |
+| `BITRIX_WEBHOOK_URL` | Webhook del portal con permisos CRM |
+| `BITRIX_CALENDAR_WEBHOOK_URL` | Webhook del mismo portal con permisos calendar; opcional si el anterior ya los tiene |
+| `APPOINTMENT_ADVISORS_JSON` | Lista de `{id, name, bitrixUserId}`; conservar IDs durante la migración |
+| `CHATFUEL_BOT_ID` | Bot atendido |
+| `CHATFUEL_API_TOKEN` | Credencial propia de Chatfuel |
+| `CHATFUEL_BOOKING_SECRET` | Secreto de al menos 32 caracteres para HTTP y estados firmados |
+| `CHATFUEL_BOOKING_FLOW_ID` | Flujo existente de agenda |
+| `HANDOFF_SYNC_ENABLED` | Activa el observador |
+| `INCOMING_RECOVERY_ENABLED` | Recupera mensajes pendientes cuando la plataforma lo permite |
 | `APPOINTMENT_SAME_DAY_CUTOFF_HOUR` | Corte para ofrecer el mismo día; 12 por defecto |
-| `HANDOFF_SYNC_ENABLED` | Activa el observador cuando vale `true` |
-| `INCOMING_RECOVERY_ENABLED` | Recupera mensajes sin asignar; requiere el observador y permisos de control en Meta |
+| `REGISTRAR_CLIENTE_TOKEN` | Protección opcional del registro |
 | `PORT` | Puerto HTTP; 3000 por defecto |
 
-Configurar valores propios del servicio nuevo. Las referencias a variables
-de otro servicio del proyecto DalIA deben resolverse y reemplazarse por
-variables del nuevo proyecto al migrar. La conexión con 30X usa su API HTTPS.
+No hay variables obligatorias de otro CRM. Los atributos históricos `crm_30x_`
+se conservan por compatibilidad con Chatfuel; ahora se resuelven en nuestro MySQL.
 
-## Endpoints
+## Rutas y datos
 
-| Método | Ruta | Uso |
+| Método | Ruta | Autenticación |
 | --- | --- | --- |
-| GET | `/health` | Estado, versión y conexión del observador; sin datos de clientes |
-| POST | `/booking` | Inicio o continuación del flujo de calendario |
-| POST | `/sync-handoffs` | Revisión de transferencias pendientes |
+| GET | `/health` | Pública; estado y versión, sin datos personales |
+| GET / POST | `/registrar-cliente?id=123` | Token opcional del registro |
+| POST | `/booking` | `Bearer CHATFUEL_BOOKING_SECRET` |
+| POST | `/sync-handoffs` | `Bearer CHATFUEL_BOOKING_SECRET` |
 
-Los POST requieren `Authorization: Bearer <CHATFUEL_BOOKING_SECRET>`.
-`/booking` recibe `contactId` y `operation` (`start` o `step`), y devuelve
-`message`, `done`, `human`, `state` y `clientCode`. El flujo guarda la respuesta
-en `bitrix_agenda_respuesta` y deriva al equipo cuando `human` es `si`.
+`/booking` conserva `{contactId, operation: "start" | "step"}` y su respuesta.
+El calendario se llama dentro del proceso, sin una segunda API.
+Tablas: `clientes`, `chatfuel_perfiles`, `chatfuel_citas`, `chatfuel_comentarios`.
+Una cita incierta bloquea su intervalo hasta verificarse.
 
-## Estado de la separación
+## Publicación
 
-El código está publicado con la cuenta **JhonAlex37**, en este repositorio y
-su rama `main`. Railway está conectado a ese origen y despliega los cambios
-automáticamente. El servicio independiente usa
-`https://apichatfuel-production.up.railway.app`.
+GitHub: `JhonAlex37/Api_Chatfuel`, rama `main`; cada colaborador usa su propia cuenta.
+Servicio: https://apichatfuel-production.up.railway.app
 
-Las dos acciones HTTP de la agenda de Chatfuel apuntan a ese dominio. El
-observador nuevo está activo; el anterior del proyecto DalIA quedó desactivado
-como respaldo de reversión. El motor original mantiene su configuración.
-Ver [docs/MIGRACION.md](docs/MIGRACION.md) y [docs/RAILWAY.md](docs/RAILWAY.md).
+Después del push, `/health` debe indicar `version: "1.0.6"` y
+`calendar.independent: true`. La carpeta temporal `AI-First-One/` está excluida
+de Git y Docker y se puede eliminar: no forma parte del arranque ni de las pruebas.
 
-Configuración de despliegue basada en las guías oficiales de
-[Bun con Docker](https://bun.com/guides/ecosystem/docker) y
-[Railway Config as Code](https://docs.railway.com/config-as-code/reference).
-
-## Configuración de conversación y pruebas
-
-La revisión de tono y el reinicio solicitado por el cliente están versionados
-en `config/chatfuel/rch-questions.json`. Su aplicación en Chatfuel es separada
-del despliegue de Railway. Ver [docs/PRUEBAS.md](docs/PRUEBAS.md) para iniciar
-una nueva revisión y verificar la reserva real en Bitrix.
-
-## V1.0.1: horarios libres más separados
-
-La agenda reparte hasta tres opciones entre el inicio, la mitad y el final
-de la disponibilidad verificada. Si hay pocos huecos, muestra menos opciones
-para evitar horas consecutivas. Ver [docs/HORARIOS.md](docs/HORARIOS.md).
-
-
-## Una API y una base MySQL separada
-
-El servicio `Api_Chatfuel` expone tanto `/registrar-cliente?id=...` como
-`/booking`, `/sync-handoffs` y `/health`. El código del registro de clientes
-se integró desde `Proyecta-SAS/Api_Chatfuel` conservando sus consultas a Bitrix,
-su token opcional y la tabla `clientes`. No envía WhatsApp por registrar una fila.
-El servicio `MySQL` conserva los datos y permanece aparte.
-
-El servidor HTTP de Node entrega las rutas de agenda al mismo conector que
-ya validaba disponibilidad, consentimiento e idempotencia. No necesita una
-segunda API. `/health` comprueba MySQL y la configuración de la agenda.
+Ver [migración](docs/MIGRACION.md), [Railway](docs/RAILWAY.md),
+[vinculación](docs/VINCULACION-CITAS.md) y [pruebas WhatsApp](docs/PRUEBAS.md).

@@ -2,6 +2,7 @@ import mysql from 'mysql2/promise';
 import { readFile } from 'node:fs/promises';
 import { phoneVariants } from './phone.js';
 import { AppError } from './errors.js';
+import { createSchedulingStore } from './calendar/store.js';
 
 export const schemaUrl = new URL('../sql/001_clientes.sql', import.meta.url);
 
@@ -12,7 +13,13 @@ export function createDatabase(uri) {
     supportBigNumbers: true, bigNumberStrings: true, timezone: 'Z',
   });
   return {
-    async init() { await pool.query(await readFile(schemaUrl, 'utf8')); },
+    scheduling: createSchedulingStore(pool),
+    async init() {
+      await pool.query(await readFile(schemaUrl, 'utf8'));
+      for (const statement of (await readFile(new URL('../sql/002_agenda.sql', import.meta.url), 'utf8')).split(';').map(s => s.trim()).filter(Boolean)) {
+        await pool.query(statement);
+      }
+    },
     async ping() { await pool.query({ sql: 'SELECT 1', timeout: 5000 }); },
     async findClienteByPhone(phone) {
       const variants = phoneVariants(phone);

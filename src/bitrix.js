@@ -6,21 +6,23 @@ export function validId(value) {
 }
 
 export function createBitrixClient(baseUrl, { fetchImpl = fetch, timeoutMs = 10000 } = {}) {
-  async function call(method, id) {
+  async function call(method, params = {}) {
     let response, payload;
     try {
       response = await fetchImpl(new URL(`${method}.json`, baseUrl), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify(typeof params === 'object' ? params : { id: params }),
         signal: AbortSignal.timeout(timeoutMs),
         redirect: 'error',
       });
       payload = await response.json();
     } catch (error) {
       const timeout = ['TimeoutError', 'AbortError'].includes(error.name);
-      throw new AppError(timeout ? 504 : 502, timeout ? 'BITRIX_TIMEOUT' : 'BITRIX_NO_DISPONIBLE',
+      const failure = new AppError(timeout ? 504 : 502, timeout ? 'BITRIX_TIMEOUT' : 'BITRIX_NO_DISPONIBLE',
         timeout ? 'Bitrix tardó demasiado en responder.' : 'No se pudo consultar Bitrix.');
+      failure.retryable = true;
+      throw failure;
     }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       throw new AppError(502, 'BITRIX_RESPUESTA_INVALIDA', 'Bitrix devolvió una respuesta inválida.');
@@ -30,7 +32,9 @@ export function createBitrixClient(baseUrl, { fetchImpl = fetch, timeoutMs = 100
           || (payload.error === '' && payload.error_description === 'Not found'))) {
         throw new AppError(404, 'NEGOCIACION_NO_ENCONTRADA', 'La negociación no existe en Bitrix.');
       }
-      throw new AppError(502, 'BITRIX_ERROR', 'Bitrix rechazó la consulta. Verifica el webhook y sus permisos CRM.');
+      const failure = new AppError(502, 'BITRIX_ERROR', 'Bitrix rechazó la consulta. Verifica el webhook y sus permisos.');
+      failure.retryable = response.status === 429 || response.status >= 500;
+      throw failure;
     }
     if (payload.result == null || payload.result === false) {
       throw new AppError(502, 'BITRIX_RESPUESTA_INVALIDA', 'Bitrix devolvió una respuesta inválida.');
@@ -39,6 +43,7 @@ export function createBitrixClient(baseUrl, { fetchImpl = fetch, timeoutMs = 100
   }
 
   return {
+    call,
     async getCliente(id) {
       const deal = await call('crm.deal.get', id);
       if (String(deal.ID) !== id) throw new AppError(502, 'BITRIX_RESPUESTA_INVALIDA', 'La negociación recibida no corresponde al ID solicitado.');

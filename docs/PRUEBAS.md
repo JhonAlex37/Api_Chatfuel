@@ -21,7 +21,7 @@ las respuestas posteriores a la nueva solicitud.
 
 Antes de limpiar los atributos de perfil de un contacto de prueba autorizado,
 guardar una copia fuera de Git y comprobar que no haya una reserva pendiente
-o confirmada. Conservar el identificador de 30X, las marcas de sincronización
+o confirmada. Conservar el identificador del cliente, las marcas de sincronización
 y todos los datos de citas reales. No eliminar contactos, negociaciones,
 conversaciones ni conexiones para ejecutar esta prueba.
 
@@ -39,7 +39,7 @@ sola el comportamiento del modelo.
 4. Elegir franja, día y uno de los horarios consultados en Bitrix.
 5. Confirmar expresamente la reserva del horario elegido.
 6. Verificar el identificador del evento y la cita de diez minutos en Bitrix,
-   y que la misma negociación de 30X conserve el comentario del perfil nuevo.
+   y que la misma negociación de Bitrix conserve el comentario del perfil nuevo.
 
 La disponibilidad consultada no significa que exista una reserva. No crear
 una cita de prueba automáticamente: la persona debe elegir y confirmarla.

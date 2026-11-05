@@ -7,3 +7,5 @@ coverage/
 *.log
 *.dpapi
 .tmp/
+# Copia temporal de referencia; nunca publicar el otro proyecto con git add -A.
+AI-First-One/

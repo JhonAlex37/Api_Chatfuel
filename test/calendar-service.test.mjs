@@ -1,0 +1,220 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { createSchedulingService, readAdvisors } from '../src/calendar/service.js';
+import { createDatabase } from '../src/database.js';
+import { createHandler } from '../src/connector.mjs';
+import { importCalendar } from '../scripts/import-calendar.mjs';
+
+const NOW = Date.parse('2026-11-02T12:00:00Z');
+const advisors = [{ id:'advisor-a', name:'Asesor prueba', bitrixUserId:'10' }];
+const request = { startAt:'2026-11-03T09:00:00-05:00', durationMinutes:10, advisorId:'advisor-a', advisorPool:true };
+function memoryStore() {
+  const profiles = new Map(), bookings = new Map(), locks = new Map(), comments = new Set();
+  return {
+    async withLock(key, fn) {
+      const previous = locks.get(key) || Promise.resolve();
+      let unlock; const next = new Promise(resolve => { unlock=resolve; }); locks.set(key,next);
+      await previous;
+      try { return await fn(this); } finally { unlock(); if(locks.get(key)===next) locks.delete(key); }
+    },
+    async resolveProfile(phone, code) {
+      const found = [...profiles.values()].find(p=>p.phone===phone);
+      if(found) return found;
+      const profile={ clientCode:code||`CF-${profiles.size}`, name:'Contacto WhatsApp', phone, data:{} };
+      profiles.set(profile.clientCode,profile);return profile;
+    },
+    async getProfile(code) { return profiles.get(code); },
+    async saveProfile(profile, body) { profiles.set(profile.clientCode,{...profile,name:body.contactName||profile.name,data:body}); },
+    async getByKey(key) { return structuredClone([...bookings.values()].find(b=>b.key===key)); },
+    async getAppointment(id) { return structuredClone(bookings.get(id)); },
+    async reservations() { return [...bookings.values()].filter(b=>['pending','confirmed'].includes(b.status)); },
+    async insertPending(row) { bookings.set(row.id,structuredClone({...row,createdAt:new Date(NOW).toISOString()})); },
+    async confirm(id,eventId,response) { Object.assign(bookings.get(id),{status:'confirmed',bitrixEventId:eventId,response:structuredClone(response)}); },
+    async saveSync(id,response) { bookings.get(id).response=structuredClone(response); },
+    async claimComment(hash) { if(comments.has(hash)) return false;comments.add(hash);return true; },
+    async confirmComment() {},
+  };
+}
+function fixture(store = memoryStore()) {
+  let failCreate=false, failStage=false, stage='C370:NEW', category='370', omitCalendar=false;
+  let registered = {id_negociacion:'777'};
+  const calls=[], events=[];
+  const database={scheduling:store,findClienteByPhone:async()=>registered};
+  const bitrix={call:async(method,params)=>{
+    calls.push({method,params});
+    if(method==='calendar.accessibility.get') return omitCalendar ? {} : {'10':[]};
+    if(method==='calendar.event.get') return structuredClone(events);
+    if(method==='calendar.event.add') {
+      const id=String(100+events.length);
+      events.push({ID:id,OWNER_ID:String(params.ownerId),DESCRIPTION:params.description,DATE_FROM:params.from,DATE_TO:params.to});
+      if(failCreate) throw new Error('Lost response');
+      return id;
+    }
+    if(method==='crm.deal.get') return {ID:'777',CATEGORY_ID:category,STAGE_ID:stage};
+    if(method==='crm.deal.update') { if(failStage) throw new Error('CRM unavailable');stage=params.fields.STAGE_ID;return true; }
+    if(method==='crm.timeline.comment.add') return '600';
+    throw new Error('Unexpected method: '+method);
+  }};
+  const service=createSchedulingService({database,bitrix,advisors,now:()=>NOW});
+  return {service,database,store,calls,events,async profile(phone='573000000001'){
+    const result=await service.upsert({phone,contactName:'Prueba simulada'});return result.clientId;
+  },get stage(){return stage;},set stage(v){stage=v;},set category(v){category=v;},set failCreate(v){failCreate=v;},
+  set failStage(v){failStage=v;},set registered(v){registered=v;},set omitCalendar(v){omitCalendar=v;}};
+}
+async function scenarios(t, create) {
+  await t.test('horarios consultados en Bitrix; ausencia de calendario falla cerrada',async()=>{
+    const f=await create();const code=await f.profile();
+    const body={dateFrom:'2026-11-03',dateTo:'2026-11-03',fromTime:'08:30',toTime:'12:00'};
+    assert.ok((await f.service.availability(code,body)).data.slots.length>0);
+    f.omitCalendar=true;await assert.rejects(f.service.availability(code,body),/INVALID_AVAILABILITY/);
+  });
+  await t.test('reserva, vincula D_ID y cambia etapa solamente después de persistir',async()=>{
+    const f=await create();const code=await f.profile();
+    const body={...request,bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'};
+    const result=await f.service.book(code,body,'booking-1');
+    assert.equal(result.data.crmSync.status,'completed');assert.equal(f.stage,'C370:EXECUTING');
+    const add=f.calls.find(c=>c.method==='calendar.event.add');assert.deepEqual(add.params.crm_fields,['D_777']);
+    assert.equal((await f.store.getByKey('booking-1')).status,'confirmed');
+    assert.ok(f.calls.findIndex(c=>c.method==='crm.deal.update')>f.calls.findIndex(c=>c.method==='calendar.event.add'));
+    assert.equal((await f.service.book(code,body,'booking-1')).data.duplicate,true);
+    assert.equal(f.events.length,1);
+    await assert.rejects(f.service.book(code,{...body,bitrixDealId:'778'},'booking-1'),/IDEMPOTENCY_KEY_CONFLICT/);
+    await assert.rejects(f.service.book(code,{...body,startAt:'2026-11-03T10:00:00-05:00'},'booking-1'),/IDEMPOTENCY_KEY_CONFLICT/);
+  });
+  await t.test('sin registro MySQL reserva sin vincular ni mover negociaciones',async()=>{
+    const f=await create();f.registered=null;const code=await f.profile();
+    const result=await f.service.book(code,request,'no-binding');
+    assert.equal(result.data.status,'confirmed');assert.equal(result.data.crmSync,null);
+    assert.equal(f.calls.some(c=>c.method.startsWith('crm.')),false);
+    assert.equal(f.calls.find(c=>c.method==='calendar.event.add').params.crm_fields,undefined);
+  });
+  await t.test('respuesta perdida se recupera por marcador sin crear otra cita',async()=>{
+    const f=await create();const code=await f.profile();f.failCreate=true;
+    await assert.rejects(f.service.book(code,request,'lost'),/Lost response/);
+    assert.equal((await f.store.getByKey('lost')).status,'pending');
+    const recovered=await f.service.book(code,request,'lost');
+    assert.equal(recovered.data.status,'confirmed');assert.equal(recovered.data.duplicate,true);
+    assert.equal(f.events.length,1);
+  });
+  await t.test('pendiente sin evento identificable queda bloqueada',async()=>{
+    const f=await create();const code=await f.profile();f.failCreate=true;
+    await assert.rejects(f.service.book(code,request,'unknown'));
+    f.events.length=0;
+    await assert.rejects(f.service.book(code,request,'unknown'),/BOOKING_CHECK_REQUIRED/);
+    assert.equal(f.calls.filter(c=>c.method==='calendar.event.add').length,1);
+  });
+  await t.test('dos solicitudes concurrentes con misma clave crean un evento',async()=>{
+    const f=await create();const code=await f.profile();
+    const results=await Promise.all([f.service.book(code,request,'concurrent'),f.service.book(code,request,'concurrent')]);
+    assert.equal(results[0].data.appointmentId,results[1].data.appointmentId);assert.equal(f.events.length,1);
+  });
+  await t.test('dos clientes compiten por el horario; solo uno lo reserva',async()=>{
+    const f=await create();const a=await f.profile(),b=await f.profile('573000000002');
+    const results=await Promise.allSettled([f.service.book(a,request,'same-slot-1'),f.service.book(b,request,'same-slot-2')]);
+    assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
+    assert.match(results.find(r=>r.status==='rejected').reason.message,/SLOT_UNAVAILABLE/);assert.equal(f.events.length,1);
+  });
+  await t.test('reintento CRM no vuelve a reservar y respeta un cambio manual de etapa',async()=>{
+    const f=await create();const code=await f.profile();f.failStage=true;
+    const result=await f.service.book(code,{...request,bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'},'stage');
+    assert.equal(result.data.status,'confirmed');assert.equal(result.data.crmSync.status,'pending');
+    f.failStage=false;f.stage='C370:WON';
+    assert.equal((await f.service.syncCrm(result.data.appointmentId)).status,'pending');assert.equal(f.stage,'C370:WON');
+    f.stage='C370:NEW';assert.equal((await f.service.syncCrm(result.data.appointmentId)).status,'completed');assert.equal(f.events.length,1);
+  });
+  await t.test('negociación incorrecta o ambigua no crea evento',async()=>{
+    const f=await create();const code=await f.profile();f.category='99';
+    await assert.rejects(f.service.book(code,{...request,bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'},'invalid'),/INVALID_BITRIX_DEAL/);
+    assert.equal(f.events.length,0);
+    f.database.findClienteByPhone=async()=>{throw new Error('TELEFONO_AMBIGUO');};
+    await assert.rejects(f.service.book(code,{...request,bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'},'ambiguous'),/TELEFONO_AMBIGUO/);
+  });
+  await t.test('reserva heredada sin fila local nunca se recrea',async()=>{
+    const f=await create();const code=await f.profile();
+    await assert.rejects(f.service.book(code,{...request,resumeOnly:true},'legacy'),/LEGACY_BOOKING_REVIEW_REQUIRED/);
+    assert.equal(f.events.length,0);
+  });
+  await t.test('perfil y comentario repetido conservan cliente y no duplican comentario',async()=>{
+    const f=await create();const body={phone:'573000000001',externalLeadId:'OLD-CODE',contactName:'Persona prueba',summary:'Resumen ficticio'};
+    const first=await f.service.upsert(body);assert.equal(first.clientId,'OLD-CODE');
+    assert.equal((await f.service.upsert(body)).clientId,first.clientId);
+    assert.equal(f.calls.filter(c=>c.method==='crm.timeline.comment.add').length,1);
+  });
+}
+test('motor independiente con Bitrix simulado',async t=>scenarios(t,async()=>fixture()));
+test('motor independiente con MySQL real: persistencia, locks y recuperación', {skip:!process.env.TEST_MYSQL_URL},async t=>{
+  const mysql=(await import('mysql2/promise')).default;
+  const uri=new URL(process.env.TEST_MYSQL_URL);uri.pathname='/';
+  const admin=await mysql.createConnection(uri.href);const name='chatfuel_calendar_test_'+randomBytes(6).toString('hex');
+  let db;
+  try {
+    await admin.query(`CREATE DATABASE \`${name}\``);uri.pathname='/'+name;
+    db=createDatabase(uri.href);await db.init();await db.init();
+    await scenarios(t,async()=>{
+      for(const table of ['chatfuel_citas','chatfuel_comentarios','chatfuel_perfiles']) await admin.query(`DELETE FROM \`${name}\`.${table}`);
+      return fixture(db.scheduling);
+    });
+  } finally {if(db) await db.close();await admin.query(`DROP DATABASE IF EXISTS \`${name}\``);await admin.end();}
+});
+test('configuración rechaza asesores duplicados o incompletos',()=>{
+  assert.throws(()=>readAdvisors({}),/INVALID_ADVISORS/);
+  assert.throws(()=>readAdvisors({APPOINTMENT_ADVISORS_JSON:JSON.stringify([...advisors,...advisors])}),/INVALID_ADVISORS/);
+  assert.deepEqual(readAdvisors({APPOINTMENT_ADVISORS_JSON:JSON.stringify(advisors)}),advisors);
+});
+
+test('Chatfuel recorre la agenda propia completa sin HTTP hacia otro CRM',async()=>{
+  const f=fixture();
+  const id='wa_999999999999_888888888888_573000000001';
+  const fields={nombre_completo:'Persona simulada',ciudad_municipio:'Bogotá',obligacion_vivienda_activa:'si'};
+  const secret='secreto-local-exclusivo-para-test-123456789';
+  const handler=createHandler({database:f.database,scheduling:f.service,now:()=>NOW,
+    env:{CHATFUEL_BOT_ID:'mock',CHATFUEL_API_TOKEN:'mock',CHATFUEL_BOOKING_SECRET:secret},
+    fetchImpl:async(url,init)=>{
+      assert.equal(url,'https://panel.chatfuel.com/graphql','el único HTTP del conector es Chatfuel');
+      const payload=JSON.parse(init.body);
+      if(payload.query.includes('query BookingContact')) return Response.json({data:{bot:{contact:{id,phone:'573000000001',
+        attributes:Object.entries(fields).map(([name,value])=>({attr:{name},value:{stringValue:value}}))}}}});
+      const data={};for(const match of payload.query.matchAll(/a(\d+):contactAttributeUpdate\(id:\$id,attrName:("(?:\\.|[^"\\])*"),attrValue:\$v\d+\)/g)) {
+        fields[JSON.parse(match[2])]=payload.variables[`v${match[1]}`];data[`a${match[1]}`]={id};
+      }
+      return Response.json({data});
+    }});
+  async function step(operation,answer) {
+    if(answer!==undefined)fields.bitrix_agenda_respuesta=answer;
+    const result=await handler(new Request('http://localhost/booking',{method:'POST',headers:{Authorization:`Bearer ${secret}`},body:JSON.stringify({contactId:id,operation})}));
+    return result.json();
+  }
+  assert.match((await step('start')).message,/mañana/);
+  await step('step','mañana');await step('step','1');
+  assert.match((await step('step','1')).message,/Confirmas/);
+  assert.equal(f.events.length,0);
+  const result=await step('step','sí');
+  assert.match(result.message,/quedó agendada/);assert.equal(f.events.length,1);
+  assert.equal(fields.bitrix_negociacion_id,'777');assert.equal(f.stage,'C370:EXECUTING');
+  await step('step','sí');assert.equal(f.events.length,1);
+});
+
+test('importador MySQL conserva citas y es idempotente', {skip:!process.env.TEST_MYSQL_URL},async()=>{
+  const mysql=(await import('mysql2/promise')).default;
+  const uri=new URL(process.env.TEST_MYSQL_URL);uri.pathname='/';
+  const admin=await mysql.createConnection({uri:uri.href,timezone:'Z'});
+  const name='chatfuel_import_test_'+randomBytes(6).toString('hex');let db;
+  try {
+    await admin.query(`CREATE DATABASE \`${name}\``);uri.pathname='/'+name;
+    db=createDatabase(uri.href);await db.init();await admin.query(`USE \`${name}\``);
+    const snapshot={profiles:[{codigo:'LEGACY-1',telefono:'573000000001',nombre:'Prueba',answers:{}}],appointments:[{
+      id:'11111111-1111-4111-8111-111111111111',client_code:'LEGACY-1',advisor_user_id:'advisor-a',bitrix_owner_id:'10',bitrix_event_id:'200',
+      idempotency_key:'chatfuel-'+'a'.repeat(64),starts_at:request.startAt,ends_at:'2026-11-03T09:10:00-05:00',status:'confirmed',
+      request_payload:request,response_payload:{crmSync:null},created_at:'2026-11-02T12:00:00Z',
+    }]};
+    assert.deepEqual(await importCalendar(admin,snapshot),{profilesImported:1,appointmentsImported:1});
+    assert.deepEqual(await importCalendar(admin,snapshot),{profilesImported:0,appointmentsImported:0});
+    const row=await db.scheduling.getByKey(snapshot.appointments[0].idempotency_key);
+    assert.equal(row.bitrixEventId,'200');assert.equal(Date.parse(row.startAt),Date.parse(request.startAt));
+    const f=fixture(db.scheduling);
+    assert.equal((await f.service.book('LEGACY-1',request,snapshot.appointments[0].idempotency_key)).data.duplicate,true);
+    assert.equal(f.events.length,0);
+    snapshot.profiles[0].telefono='573000000002';await assert.rejects(importCalendar(admin,snapshot),/PROFILE_CONFLICT/);
+  } finally {if(db)await db.close();await admin.query(`DROP DATABASE IF EXISTS \`${name}\``);await admin.end();}
+});

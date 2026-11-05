@@ -1,0 +1,79 @@
+import { createHash, randomUUID } from 'node:crypto';
+
+const parse = value => typeof value === 'string' ? JSON.parse(value) : value;
+const iso = value => new Date(value).toISOString();
+const appointment = row => row && ({ id: row.id, clientCode: row.cliente_codigo,
+  advisorId: row.asesor_id, bitrixUserId: row.bitrix_usuario_id, bitrixEventId: row.bitrix_evento_id,
+  key: row.clave_idempotencia, startAt: iso(row.inicio), endAt: iso(row.fin), status: row.estado,
+  request: parse(row.solicitud), response: parse(row.respuesta), createdAt: iso(row.creado_en) });
+
+export function createSchedulingStore(pool, executor = pool) {
+  const store = {
+    async withLock(key, action) {
+      // GET_LOCK is connection scoped: keep this connection until release, including
+      // the durable pending write before the external event creation.
+      const connection = executor === pool ? await pool.getConnection() : executor;
+      const name = 'cf:' + createHash('sha256').update(key).digest('hex').slice(0, 60);
+      let acquired = false, releaseFailed = false;
+      try {
+        const [rows] = await connection.execute('SELECT GET_LOCK(?, 10) AS acquired', [name]);
+        if (Number(rows[0].acquired) !== 1) throw new Error('BOOKING_BUSY');
+        acquired = true;
+        return await action(createSchedulingStore(pool, connection));
+      } finally {
+        if (acquired) { try { await connection.execute('SELECT RELEASE_LOCK(?)', [name]); } catch { releaseFailed = true; } }
+        if (executor === pool) { if (releaseFailed) connection.destroy(); else connection.release(); }
+      }
+    },
+    async resolveProfile(phone, preferredCode) {
+      return store.withLock('profile:' + phone, async locked => {
+        const [rows] = await locked.sql('SELECT * FROM chatfuel_perfiles WHERE telefono=?', [phone]);
+        if (rows[0]) return { clientCode: rows[0].codigo, name: rows[0].nombre, phone, data: parse(rows[0].datos) };
+        const code = preferredCode || 'CF-' + randomUUID();
+        if (!/^[\w:-]{1,128}$/.test(code)) throw new Error('INVALID_CLIENT_CODE');
+        await locked.sql('INSERT INTO chatfuel_perfiles(codigo,telefono,datos) VALUES(?,?,?)', [code, phone, '{}']);
+        return { clientCode: code, name: 'Contacto WhatsApp', phone, data: {} };
+      });
+    },
+    async getProfile(code) {
+      const [rows] = await executor.execute('SELECT * FROM chatfuel_perfiles WHERE codigo=?', [code]);
+      return rows[0] && { clientCode: rows[0].codigo, name: rows[0].nombre, phone: rows[0].telefono, data: parse(rows[0].datos) };
+    },
+    async saveProfile(profile, body) {
+      await executor.execute('UPDATE chatfuel_perfiles SET nombre=?,conversacion=?,datos=? WHERE codigo=?',
+        [body.contactName || profile.name, body.externalConversationId || null,
+          JSON.stringify({ ...profile.data, ...body, answers: { ...profile.data?.answers, ...body.answers } }), profile.clientCode]);
+    },
+    async getByKey(key) {
+      const [rows] = await executor.execute('SELECT * FROM chatfuel_citas WHERE clave_idempotencia=?', [key]);
+      return appointment(rows[0]);
+    },
+    async getAppointment(id) {
+      const [rows] = await executor.execute('SELECT * FROM chatfuel_citas WHERE id=?', [id]);
+      return appointment(rows[0]);
+    },
+    async reservations(from, to) {
+      const [rows] = await executor.execute(`SELECT * FROM chatfuel_citas WHERE estado IN ('pending','confirmed') AND inicio<? AND fin>?`,
+        [new Date(`${to}T23:59:59.999-05:00`), new Date(`${from}T00:00:00-05:00`)]);
+      return rows.map(appointment);
+    },
+    async insertPending(row) {
+      await executor.execute(`INSERT INTO chatfuel_citas(id,cliente_codigo,asesor_id,bitrix_usuario_id,clave_idempotencia,inicio,fin,estado,solicitud,respuesta)
+        VALUES(?,?,?,?,?,?,?,'pending',?,?)`, [row.id, row.clientCode, row.advisorId, row.bitrixUserId, row.key,
+        new Date(row.startAt), new Date(row.endAt), JSON.stringify(row.request), JSON.stringify(row.response)]);
+    },
+    async confirm(id, eventId, response) {
+      await executor.execute("UPDATE chatfuel_citas SET estado='confirmed',bitrix_evento_id=?,respuesta=? WHERE id=?", [eventId, JSON.stringify(response), id]);
+    },
+    async saveSync(id, response) { await executor.execute('UPDATE chatfuel_citas SET respuesta=? WHERE id=?', [JSON.stringify(response), id]); },
+    async claimComment(hash, dealId) {
+      const [result] = await executor.execute('INSERT IGNORE INTO chatfuel_comentarios(huella,negociacion_id) VALUES(?,?)', [hash, dealId]);
+      return result.affectedRows === 1;
+    },
+    async confirmComment(hash, id) {
+      await executor.execute("UPDATE chatfuel_comentarios SET estado='confirmed',comentario_id=? WHERE huella=?", [String(id), hash]);
+    },
+    sql: (query, params) => executor.execute(query, params),
+  };
+  return store;
+}

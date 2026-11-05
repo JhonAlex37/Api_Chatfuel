@@ -6,9 +6,8 @@ import { createHandler } from '../src/connector.mjs';
 
 const SECRET = 'clave-local-de-agenda-solo-para-pruebas-12345';
 function agenda(configured = true) {
-  return createHandler({ env: configured ? {
+  return createHandler({ scheduling: { request: async () => { throw new Error('No calendar calls expected'); } }, env: configured ? {
     CHATFUEL_BOT_ID: 'bot-simulado', CHATFUEL_API_TOKEN: 'token-simulado', CHATFUEL_BOOKING_SECRET: SECRET,
-    AI_FIRST_ONE_BASE_URL: 'https://crm.example.invalid', AI_FIRST_ONE_APPOINTMENTS_TOKEN: 'token-simulado',
   } : {}, fetchImpl: async () => { throw new Error('No se permiten servicios externos en estas pruebas'); } });
 }
 async function serve(t, bookingHandler, logger = { error() {} }) {
@@ -42,7 +41,7 @@ test('la salud conjunta identifica la versión y comprueba MySQL y la configurac
   const response = await request('/health');
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.equal(body.version, '1.0.5');
+  assert.equal(body.version, '1.0.6');
   assert.equal(body.service, 'api-chatfuel');
   assert.equal(body.mysql.ok, true);
   assert.equal(body.handoff.enabled, false);
