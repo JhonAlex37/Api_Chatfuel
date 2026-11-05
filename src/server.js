@@ -10,7 +10,7 @@ try {
   const config = readConfig();
   database = createDatabase(config.mysqlUrl);
   await database.init();
-  const bookingHandler = createHandler();
+  const bookingHandler = createHandler({ database });
   const server = createApp({ database, bitrix: createBitrixClient(config.bitrixUrl), webhookToken: config.webhookToken, bookingHandler });
   server.listen(config.port, '0.0.0.0', () => console.log(`API escuchando en puerto ${config.port}`));
   server.on('error', () => { console.error('No se pudo iniciar el servidor HTTP.'); process.exit(1); });

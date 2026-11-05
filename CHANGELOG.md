@@ -1,3 +1,11 @@
+# V1.0.4 - 2026-11-05
+
+- Busca en MySQL el teléfono antes de reservar y vincula su negociación al evento de calendario.
+- Solicita `C370:EXECUTING` solo después de confirmar la cita; sin registro conserva el flujo anterior.
+- Normaliza teléfonos colombianos y pide revisión si existen varias negociaciones para el mismo número.
+- Fija el vínculo en los reintentos y conserva citas confirmadas si queda pendiente el cambio de etapa.
+- Mantiene la recuperación de mensajes incorporada en V1.0.3.
+
 # V1.0.1
 
 - Ofrece horarios libres más separados dentro de la franja seleccionada.

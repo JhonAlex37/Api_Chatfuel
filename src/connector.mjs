@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual, createHash } from 'node:crypto';
 
-export const RELEASE_VERSION = '1.0.3';
+export const RELEASE_VERSION = '1.0.4';
 
 const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa',
   'tipo_obligacion', 'banco_entidad', 'estado_pago', 'necesidad_principal',
@@ -159,7 +159,7 @@ function selectedDay(value, days, now) {
 }
 const json = (data, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
 
-export function createHandler({ env = process.env, fetchImpl = fetch, now = () => Date.now() } = {}) {
+export function createHandler({ env = process.env, fetchImpl = fetch, now = () => Date.now(), database = null } = {}) {
   const botID = env.CHATFUEL_BOT_ID;
   const secret = env.CHATFUEL_BOOKING_SECRET;
   const crmBase = env.AI_FIRST_ONE_BASE_URL;
@@ -490,8 +490,20 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
       const { phone, fields } = await contact(contactId);
       const answer = String(fields.bitrix_agenda_respuesta ?? '').trim();
       const state = decode(fields.bitrix_agenda_estado, contactId);
-      if (state?.step === 'confirmed') return reply(contactId, state,
-        `Tu cita ya está confirmada para ${label(state.slot)} (hora de Colombia).`, { done: true });
+      if (state?.step === 'confirmed') {
+        // Retrying a stage update must never request another calendar event.
+        let pending = state.crmSyncPending === true;
+        if (pending && state.appointmentId) {
+          try {
+            const result = await crm('/api/v1/appointments/retry-crm', { appointmentId: state.appointmentId });
+            const sync = result.data?.results?.find(item => item.appointmentId === state.appointmentId)?.crmSync;
+            pending = !(sync?.status === 'completed' && String(sync.dealId) === state.bookingDealId && sync.stageId === 'C370:EXECUTING');
+          } catch { /* The booking remains confirmed when CRM is unavailable. */ }
+        }
+        return reply(contactId, { ...state, crmSyncPending: pending },
+          `Tu cita ya está confirmada para ${label(state.slot)} (hora de Colombia).`,
+          { done: true, fields: { bitrix_negociacion_sync: pending ? 'pendiente' : state.bookingDealId ? 'completado' : 'no_aplica' } });
+      }
       if (yes(fields.bitrix_reserva_pendiente) && state?.step !== 'booking') return reply(contactId,
         { step: 'check_pending' }, 'Hay una reserva pendiente de verificación. Un asesor debe comprobarla antes de solicitar otra cita.', { done: true });
       if (operation === 'start' && state?.step !== 'booking') return profileOrOptions(contactId, phone, fields);
@@ -560,24 +572,45 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
       }
       if (state.step === 'confirm' || state.step === 'booking') {
         if (state.step === 'confirm' && !confirmBooking(answer)) return reply(contactId, state, '¿Confirmas que reserve el horario elegido? Si prefieres dejarlo pendiente, también me lo puedes decir.');
+        // Resolve before creating the appointment and freeze even a missing match
+        // in signed state, so retries cannot bind an already created event elsewhere.
+        let bookingDealId = Object.hasOwn(state, 'bookingDealId') ? state.bookingDealId : null;
+        if (!Object.hasOwn(state, 'bookingDealId') && state.step !== 'booking' && database) {
+          try {
+            const registered = await database.findClienteByPhone(phone);
+            bookingDealId = registered ? String(registered.id_negociacion) : null;
+            if (bookingDealId !== null && !/^[1-9]\d*$/.test(bookingDealId)) throw new Error('INVALID_DEAL');
+          } catch (error) {
+            return reply(contactId, state,
+              error.code === 'TELEFONO_AMBIGUO'
+                ? 'Encontré más de una negociación asociada a tu teléfono. Un asesor debe revisar cuál corresponde antes de reservar.'
+                : 'No pude consultar tu registro en este momento. La cita aún no se ha solicitado; podemos reintentar la confirmación.',
+              { done: error.code === 'TELEFONO_AMBIGUO', human: error.code === 'TELEFONO_AMBIGUO' });
+          }
+        }
         const key = `chatfuel-${createHash('sha256').update(`${contactId}|${state.clientCode}|${state.slot.startAt}|${state.slot.advisorId}`).digest('hex')}`;
         await setAttributes(contactId, { bitrix_reserva_pendiente: 'si',
-          bitrix_agenda_estado: encode(contactId, { ...state, step: 'booking' }) });
+          bitrix_agenda_estado: encode(contactId, { ...state, step: 'booking', bookingDealId }) });
         try {
           const result = await crm(`/api/v1/leads/${encodeURIComponent(state.clientCode)}/appointments`, {
             startAt: state.slot.startAt, durationMinutes: 10, advisorId: state.slot.advisorId,
             advisorPool: true, idempotencyKey: key,
+            ...(bookingDealId ? { bitrixDealId: bookingDealId, bitrixStageId: 'C370:EXECUTING' } : {}),
           }, key);
           const booking = result.data;
           if (booking?.status !== 'confirmed' || !/^\d+$/.test(String(booking.bitrixEventId ?? ''))
             || Number(booking.bitrixEventId) <= 0 || !booking.appointmentId
             || Date.parse(booking.startAt) !== Date.parse(state.slot.startAt)
             || Date.parse(booking.endAt) - Date.parse(booking.startAt) !== 600_000) throw new Error('INVALID_BOOKING_CONFIRMATION');
-          return reply(contactId, { step: 'confirmed', clientCode: state.clientCode,
+          const crmSyncPending = Boolean(bookingDealId && !(booking.crmSync?.status === 'completed'
+            && String(booking.crmSync.dealId) === bookingDealId && booking.crmSync.stageId === 'C370:EXECUTING'));
+          return reply(contactId, { step: 'confirmed', clientCode: state.clientCode, bookingDealId, crmSyncPending,
             slot: state.slot, bitrixEventId: String(booking.bitrixEventId), appointmentId: booking.appointmentId },
           `✅ Tu llamada quedó agendada para ${label(state.slot)} (hora de Colombia). Duración: 10 minutos. Te esperamos; si necesitas revisarla, escríbenos por este mismo chat.`,
           { done: true, fields: { bitrix_reserva_pendiente: 'no', bitrix_evento_id: booking.bitrixEventId, bitrix_cita_id: booking.appointmentId,
-            bitrix_cita_inicio: booking.startAt, crm_30x_codigo: state.clientCode } });
+            bitrix_cita_inicio: booking.startAt, crm_30x_codigo: state.clientCode,
+            bitrix_negociacion_id: bookingDealId || '',
+            bitrix_negociacion_sync: crmSyncPending ? 'pendiente' : bookingDealId ? 'completado' : 'no_aplica' } });
         } catch (error) {
           if (error.message === 'SLOT_UNAVAILABLE') {
             await setAttributes(contactId, { bitrix_reserva_pendiente: 'no' });

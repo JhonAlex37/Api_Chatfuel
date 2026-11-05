@@ -23,7 +23,8 @@ const SLOTS = [
 
 function fixture({ initial = {}, bookingError = null, invalidBooking = false,
   human = false, live = true, failLead = false, latestText = 'Sí, quiero agendar una llamada',
-  naturalStatus = 'closed', botReplied = true, staleHandoffIndex = false, previousReply = '', olderMessages = [], availabilitySlots = SLOTS } = {}) {
+  naturalStatus = 'closed', botReplied = true, staleHandoffIndex = false, previousReply = '', olderMessages = [], availabilitySlots = SLOTS,
+  database = null, stagePending = false } = {}) {
   const fields = { nombre_completo: 'Persona de Prueba', ciudad_municipio: 'Bogotá',
     obligacion_vivienda_activa: 'si', ...initial };
   const calls = [];
@@ -73,13 +74,17 @@ function fixture({ initial = {}, bookingError = null, invalidBooking = false,
       }
       if (bookingError === 'network-once' && !failed) { failed = true; throw new Error('simulated lost response'); }
       return Response.json({ ok: true, data: { appointmentId: 'mock-booking', bitrixEventId: invalidBooking ? '' : '12345',
+        ...(payload.bitrixDealId ? { crmSync: { dealId: payload.bitrixDealId, stageId: payload.bitrixStageId, status: stagePending ? 'pending' : 'completed' } } : {}),
         status: 'confirmed', startAt: payload.startAt, endAt: new Date(Date.parse(payload.startAt) + 600_000).toISOString() } });
     }
+    if (url.endsWith('/appointments/retry-crm')) return Response.json({ ok: true, data: { results: [
+      { appointmentId: payload.appointmentId, crmSync: { dealId: '777', stageId: 'C370:EXECUTING', status: 'completed' } },
+    ] } });
     throw new Error(`Unexpected mocked endpoint: ${url}`);
   };
   const handle = createHandler({ env: { CHATFUEL_BOT_ID: 'mock-bot', CHATFUEL_BOOKING_SECRET: SECRET,
     CHATFUEL_API_TOKEN: 'mock-chatfuel-token', AI_FIRST_ONE_BASE_URL: 'https://crm.mock.invalid',
-    AI_FIRST_ONE_APPOINTMENTS_TOKEN: 'mock-crm-token', CHATFUEL_BOOKING_FLOW_ID: 'mock-flow' }, fetchImpl: mockFetch, now: () => time });
+    AI_FIRST_ONE_APPOINTMENTS_TOKEN: 'mock-crm-token', CHATFUEL_BOOKING_FLOW_ID: 'mock-flow' }, fetchImpl: mockFetch, now: () => time, database });
   const request = async (operation = 'step', answer, extras = {}) => {
     if (answer !== undefined) fields.bitrix_agenda_respuesta = answer;
     const response = await handle(new Request('https://connector.mock.invalid/booking', { method: 'POST',
@@ -96,6 +101,80 @@ async function prepareOptions(f) {
   await f.request('step', 'en la mañana');
   return f.request('step', '1');
 }
+
+test('busca MySQL antes de reservar y envía negociación y etapa exactas', async () => {
+  let lookups = 0;
+  const f = fixture({ database: { async findClienteByPhone(phone) {
+    assert.equal(phone, '573000000001');
+    assert.equal(f.bookings().length, 0);
+    lookups++;
+    return { id_negociacion: '777' };
+  } } });
+  await prepareOptions(f);
+  await f.request('step', '1');
+  assert.equal(lookups, 0);
+  const response = await f.request('step', 'sí');
+  assert.match(response.message, /quedó agendada/);
+  assert.equal(lookups, 1);
+  assert.equal(f.bookings()[0].payload.bitrixDealId, '777');
+  assert.equal(f.bookings()[0].payload.bitrixStageId, 'C370:EXECUTING');
+  assert.equal(f.fields.bitrix_negociacion_sync, 'completado');
+  await f.request('step', 'sí');
+  assert.equal(f.bookings().length, 1);
+  assert.equal(lookups, 1);
+});
+
+test('un cliente ausente en MySQL conserva el contrato anterior', async () => {
+  const f = fixture({ database: { findClienteByPhone: async () => null } });
+  await prepareOptions(f);
+  await f.request('step', '1');
+  assert.match((await f.request('step', 'sí')).message, /quedó agendada/);
+  assert.equal('bitrixDealId' in f.bookings()[0].payload, false);
+  assert.equal('bitrixStageId' in f.bookings()[0].payload, false);
+  assert.equal(f.fields.bitrix_negociacion_sync, 'no_aplica');
+});
+
+test('error de MySQL o teléfono ambiguo no crean citas ni marcan reserva pendiente', async () => {
+  for (const code of ['DB_DOWN', 'TELEFONO_AMBIGUO']) {
+    const f = fixture({ database: { findClienteByPhone: async () => { throw Object.assign(new Error(), { code }); } } });
+    await prepareOptions(f);
+    await f.request('step', '1');
+    const response = await f.request('step', 'sí');
+    assert.equal(response.human, code === 'TELEFONO_AMBIGUO' ? 'si' : 'no');
+    assert.equal(f.bookings().length, 0);
+    assert.notEqual(f.fields.bitrix_reserva_pendiente, 'si');
+  }
+});
+
+test('un reintento con respuesta perdida congela el vínculo incluso si no existía', async () => {
+  for (const original of [null, '777']) {
+    let lookups = 0;
+    const f = fixture({ bookingError: 'network-once', database: { findClienteByPhone: async () => {
+      lookups++;
+      return original ? { id_negociacion: original } : null;
+    } } });
+    await prepareOptions(f);
+    await f.request('step', '1');
+    await f.request('step', 'sí');
+    await f.request('step', 'sí');
+    assert.equal(lookups, 1);
+    assert.deepEqual(f.bookings()[0].payload, f.bookings()[1].payload);
+    assert.equal(f.fields.bitrix_reserva_pendiente, 'no');
+  }
+});
+
+test('etapa pendiente conserva cita confirmada y solo reintenta CRM de esa cita', async () => {
+  const f = fixture({ stagePending: true, database: { findClienteByPhone: async () => ({ id_negociacion: '777' }) } });
+  await prepareOptions(f);
+  await f.request('step', '1');
+  assert.match((await f.request('step', 'sí')).message, /quedó agendada/);
+  assert.equal(f.fields.bitrix_negociacion_sync, 'pendiente');
+  assert.equal(f.fields.bitrix_reserva_pendiente, 'no');
+  await f.request('step', 'sí');
+  assert.equal(f.bookings().length, 1);
+  assert.equal(f.fields.bitrix_negociacion_sync, 'completado');
+  assert.deepEqual(f.calls.find(call => call.url.endsWith('/retry-crm')).payload, { appointmentId: 'mock-booking' });
+});
 
 test('unauthorized and preview requests create no CRM records', async () => {
   const f = fixture();

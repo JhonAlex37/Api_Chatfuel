@@ -21,11 +21,19 @@ test('MySQL real: esquema, inserción, actualización y concurrencia sin duplica
     const [before] = await admin.query(`SELECT * FROM \`${name}\`.clientes`);
     assert.equal(before[0].nombre_completo, cliente.nombre_completo);
     assert.equal(before[0].telefono, cliente.telefono);
+    for (const phone of ['3001234567', '+57 300 123 4567', '00573001234567']) {
+      assert.equal((await database.findClienteByPhone(phone)).id_negociacion, '32135');
+    }
+    assert.equal(await database.findClienteByPhone('13001234567'), null);
+    assert.equal(await database.findClienteByPhone('573009999999'), null);
     await Promise.all(Array.from({ length: 10 }, () => database.saveCliente({ ...cliente, telefono: '+57 3019999999' })));
     const [after] = await admin.query(`SELECT * FROM \`${name}\`.clientes`);
     assert.equal(after.length, 1);
     assert.equal(after[0].telefono, '+57 3019999999');
     assert.equal(after[0].creado_en.getTime(), before[0].creado_en.getTime());
+    assert.equal(await database.findClienteByPhone('3001234567'), null);
+    await database.saveCliente({ ...cliente, id_negociacion: '32136', telefono: '301 999 9999' });
+    await assert.rejects(database.findClienteByPhone('573019999999'), { code: 'TELEFONO_AMBIGUO' });
     await database.saveCliente({ ...cliente, telefono: null });
     const [missing] = await admin.query(`SELECT telefono FROM \`${name}\`.clientes`);
     assert.equal(missing[0].telefono, null);
