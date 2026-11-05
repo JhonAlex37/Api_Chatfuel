@@ -16,6 +16,12 @@ trabaje en este proyecto. Los cambios futuros de Chatfuel se realizan aquí.
   Si un push falla, comprobar el remoto, la cuenta autenticada y el error real
   de GitHub antes de atribuirlo a una falta de permisos. `user.name` y
   `user.email` identifican la autoría del commit; no conceden acceso al remoto.
+  Antes de crear commits, comprobar `gh api user --jq .login` y la identidad
+  local de Git. Deben corresponder a la persona que publica en esa sesión.
+  Si no coinciden, usar `scripts/configurar-autor-github.ps1 -Cuenta LOGIN`
+  con la cuenta autenticada del colaborador; nunca atribuirle a otra persona
+  los cambios ni reutilizar la identidad del propietario por estar guardada.
+  Ver [docs/COLABORADORES.md](docs/COLABORADORES.md).
 - Los tokens y datos de clientes se guardan fuera de Git. No copiar .runtime,
   archivos DPAPI, documentos de clientes ni volcados del proyecto anterior.
 - Los simuladores no crean negociaciones ni citas. Una reserva real requiere
