@@ -1,4 +1,4 @@
-# Agenda propia y vinculación — V1.0.6
+# Agenda propia y vinculación — V1.0.7
 
 `src/calendar/service.js` integra perfiles, disponibilidad, reservas y sincronización.
 Se ejecuta dentro de Api_Chatfuel con su MySQL. Bitrix24 es el proveedor de calendario.
@@ -11,6 +11,22 @@ revisión humana; un error MySQL permite reintentar sin fingir que el cliente no
 El servicio verifica el embudo 370 y el teléfono antes de enviar `crm_fields: ["D_ID"]`
 a `calendar.event.add`. Guarda la confirmación local antes de actualizar la etapa,
 y verifica el cambio con `crm.deal.get`.
+
+En V1.0.7 lee el evento con `calendar.event.getbyid`, comprueba ID, horario,
+zona, marcador y dueño del calendario. Actualiza `STAGE_ID` y `ASSIGNED_BY_ID`
+juntos y comprueba ambos campos. El responsable corresponde al asesor disponible
+al confirmar, aunque difiera del que se ofreció inicialmente.
+
+Los pendientes quedan en `chatfuel_citas.respuesta.crmSync`; un trabajador los
+revisa cada 30 segundos con espera progresiva entre intentos y máximo de ocho.
+No crea eventos ni repite citas. Cambios manuales, eventos modificados o reservas
+posteriores requieren revisión y detienen el reintento automático. Las filas
+importadas conservan su contrato anterior.
+
+La firma vence a los 30 minutos para impedir reservar con una selección vieja.
+Una pausa no borra el perfil: se recupera la franja y se consulta disponibilidad
+actual. Las fechas, horas y confirmaciones vencidas se presentan nuevamente;
+una reserva ya confirmada se recupera desde MySQL sin crear otro evento.
 
 ## Persistencia e idempotencia
 
@@ -39,3 +55,6 @@ se protege para revisión; nunca se recrea a ciegas.
 
 Referencias oficiales: [crear evento](https://apidocs.bitrix24.com/api-reference/calendar/calendar-event/calendar-event-add.html)
 y [recuperar eventos](https://apidocs.bitrix24.com/api-reference/calendar/calendar-event/calendar-event-get.html).
+
+La validación de fechas usa `DATE_FROM` con `TZ_FROM`, según la
+[documentación del evento](https://apidocs.bitrix24.com/api-reference/calendar/calendar-event/calendar-event-get-by-id.html).

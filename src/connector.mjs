@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual, createHash } from 'node:crypto';
 
-export const RELEASE_VERSION = '1.0.6';
+export const RELEASE_VERSION = '1.0.7';
 
 const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa',
   'tipo_obligacion', 'banco_entidad', 'estado_pago', 'necesidad_principal',
@@ -14,7 +14,7 @@ const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa
   'bitrix_agenda_estado', 'bitrix_agenda_respuesta', 'crm_30x_codigo', 'bitrix_reserva_pendiente',
   'crm_30x_handoff_hash', 'crm_30x_profile_comment_hash', 'last user freeform input',
   'solicitud_agendamiento', 'texto_solicitud_agendamiento', 'crm_30x_booking_intent_hash',
-  'crm_30x_incoming_recovery_hash'];
+  'crm_30x_incoming_recovery_hash','bitrix_responsable_id','bitrix_responsable_sync'];
 const PROFILE = ATTR.filter(name => !name.startsWith('bitrix_') && !name.startsWith('crm_')
   && !['solicitud_agendamiento', 'texto_solicitud_agendamiento'].includes(name));
 const attributeMap = attributes => Object.fromEntries((attributes ?? []).map(({ attr, value }) =>
@@ -180,13 +180,14 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
     const payload = Buffer.from(JSON.stringify({ ...state, engine: 'local-v1', contactId, expires: now() + 30 * 60_000 })).toString('base64url');
     return `${payload}.${mac(payload)}`;
   }
-  function decode(token, contactId) {
+  function decode(token, contactId, { allowExpired = false } = {}) {
     if (!token || token.length > 20000) return null;
     const [payload, signature, extra] = token.split('.');
     if (extra || !payload || !signature || !same(signature, mac(payload))) return null;
     try {
       const state = JSON.parse(Buffer.from(payload, 'base64url').toString());
-      return state.contactId === contactId && state.expires > now() ? state : null;
+      return state.contactId === contactId && Number.isFinite(state.expires)
+        && (allowExpired || state.expires > now()) ? state : null;
     } catch { return null; }
   }
   async function graphql(query, variables) {
@@ -493,32 +494,65 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
       const { phone, fields } = await contact(contactId);
       const answer = String(fields.bitrix_agenda_respuesta ?? '').trim();
       let state = decode(fields.bitrix_agenda_estado, contactId);
+      const expired = state ? null : decode(fields.bitrix_agenda_estado, contactId, { allowExpired:true });
+      bookingMayExist = yes(fields.bitrix_reserva_pendiente)
+        || ['booking','confirmed','check_pending'].includes(state?.step || expired?.step);
+      // Profile answers and morning/afternoon preferences can resume; an expired
+      // time selection never authorizes a reservation without fresh availability.
+      if (expired && ['name','city','active','period'].includes(expired.step)) state = expired;
       // Safely bring an old selection/profile into the local store. A reservation
       // already sent to the former engine must instead be reconciled by its key.
       if (state?.clientCode && state.engine !== 'local-v1' && !['booking', 'confirmed', 'check_pending'].includes(state.step)) {
         const clientCode = await upsertLead(contactId, phone, { ...fields, crm_30x_codigo: state.clientCode });
         state = { ...state, clientCode };
       }
+      if (expired?.step === 'period' && expired.engine === 'local-v1') {
+        const clientCode = await upsertLead(contactId,phone,{...fields,crm_30x_codigo:expired.clientCode});
+        state = {...state,clientCode};
+      }
       bookingMayExist = yes(fields.bitrix_reserva_pendiente) || ['booking', 'confirmed', 'check_pending'].includes(state?.step);
+      if (!state && expired && ['booking','confirmed','check_pending'].includes(expired.step)) {
+        bookingMayExist = true;
+        const key = expired.slot && expired.clientCode ? `chatfuel-${createHash('sha256')
+          .update(`${contactId}|${expired.clientCode}|${expired.slot.startAt}|${expired.slot.advisorId}`).digest('hex')}` : null;
+        const saved = await scheduling.getBookingState({appointmentId:expired.appointmentId,key,clientCode:expired.clientCode});
+        if (saved?.status === 'confirmed') state = {...expired,step:'confirmed',appointmentId:saved.id,
+          bitrixEventId:saved.bitrixEventId,slot:{...expired.slot,startAt:saved.startAt,endAt:saved.endAt}};
+        else return reply(contactId,{...expired,step:'check_pending'},
+          'Estoy verificando la reserva anterior para evitar duplicarla. Un asesor puede ayudarte a confirmar su estado.',{done:true,human:true});
+      }
       if (state?.step === 'confirmed') {
         // Retrying a stage update must never request another calendar event.
         let pending = state.crmSyncPending === true;
+        let responsibleId = state.responsibleId || '', reviewRequired = false;
         if (pending && state.appointmentId) {
           try {
             const result = await crm('/api/v1/appointments/retry-crm', { appointmentId: state.appointmentId });
             const sync = result.data?.results?.find(item => item.appointmentId === state.appointmentId)?.crmSync;
             pending = !(sync?.status === 'completed' && String(sync.dealId) === state.bookingDealId && sync.stageId === 'C370:EXECUTING');
+            responsibleId = sync?.responsibleId || responsibleId;
+            reviewRequired = sync?.reviewRequired === true;
           } catch { /* The booking remains confirmed when CRM is unavailable. */ }
         }
-        return reply(contactId, { ...state, crmSyncPending: pending },
+        return reply(contactId, { ...state, crmSyncPending: pending,responsibleId },
           `Tu cita ya está confirmada para ${label(state.slot)} (hora de Colombia).`,
-          { done: true, fields: { bitrix_negociacion_sync: pending ? 'pendiente' : state.bookingDealId ? 'completado' : 'no_aplica' } });
+          { done: true, fields: { bitrix_negociacion_sync: reviewRequired ? 'revision_requerida' : pending ? 'pendiente' : state.bookingDealId ? 'completado' : 'no_aplica',
+            ...(state.bookingDealId ? {bitrix_responsable_id:responsibleId,
+              bitrix_responsable_sync:reviewRequired ? 'revision_requerida' : pending ? 'pendiente' : 'completado'} : {}) } });
       }
       if (yes(fields.bitrix_reserva_pendiente) && state?.step !== 'booking') return reply(contactId,
         { step: 'check_pending' }, 'Hay una reserva pendiente de verificación. Un asesor debe comprobarla antes de solicitar otra cita.', { done: true });
-      if (operation === 'start' && state?.step !== 'booking') return profileOrOptions(contactId, phone, fields);
-      if (!state) return reply(contactId, { step: 'restart' },
-        'La consulta de horarios venció. Tu cita no se ha confirmado; puedes pedirme que vuelva a consultar la disponibilidad.', { done: true });
+      if (!state && expired && ['day','choose','confirm'].includes(expired.step)) {
+        if (!fields.nombre_completo || !fields.ciudad_municipio || !yes(fields.obligacion_vivienda_activa)) return profileOrOptions(contactId,phone,fields);
+        const clientCode = await upsertLead(contactId,phone,fields);
+        await setAttributes(contactId,{crm_30x_codigo:clientCode});
+        const context = {...expired,clientCode};
+        const window = {fromTime:context.fromTime || '08:30',toTime:context.toTime || '17:00'};
+        if (expired.step !== 'day' && context.date >= dateAt(now()) && context.date <= addDays(dateAt(now()),21)) return offerTimes(contactId,context,context.date);
+        return offerDays(contactId,clientCode,window);
+      }
+      if (operation === 'start' && state?.step !== 'booking' && !(expired?.step === 'period' && periodFrom(answer))) return profileOrOptions(contactId, phone, fields);
+      if (!state) return profileOrOptions(contactId,phone,fields);
       if (/(?:hablar|comunicar|pasame|pasarme|contactar).*(?:asesor|persona|humano)|(?:asesor|persona|humano)\s+ahora|^(?:quiero|necesito)\s+(?:un\s+)?asesor|\b(?:demanda|embargo|remate|cobro juridico|urgente)\b/.test(normalize(answer))) return reply(contactId,
         { step: 'human_requested', clientCode: state.clientCode }, 'La atención pasa al equipo de Avanzar para revisar tu caso con el contexto disponible.', { done: true, human: true });
       if (state.step === 'active' && /^(no|n|0|false)[.!\s]*$/.test(normalize(answer))) {
@@ -618,12 +652,15 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
           const crmSyncPending = Boolean(bookingDealId && !(booking.crmSync?.status === 'completed'
             && String(booking.crmSync.dealId) === bookingDealId && booking.crmSync.stageId === 'C370:EXECUTING'));
           return reply(contactId, { step: 'confirmed', clientCode: state.clientCode, bookingDealId, crmSyncPending,
+            responsibleId:booking.crmSync?.responsibleId || '',
             slot: state.slot, bitrixEventId: String(booking.bitrixEventId), appointmentId: booking.appointmentId },
           `✅ Tu llamada quedó agendada para ${label(state.slot)} (hora de Colombia). Duración: 10 minutos. Te esperamos; si necesitas revisarla, escríbenos por este mismo chat.`,
           { done: true, fields: { bitrix_reserva_pendiente: 'no', bitrix_evento_id: booking.bitrixEventId, bitrix_cita_id: booking.appointmentId,
             bitrix_cita_inicio: booking.startAt, crm_30x_codigo: state.clientCode,
             bitrix_negociacion_id: bookingDealId || '',
-            bitrix_negociacion_sync: crmSyncPending ? 'pendiente' : bookingDealId ? 'completado' : 'no_aplica' } });
+            bitrix_negociacion_sync: booking.crmSync?.reviewRequired ? 'revision_requerida' : crmSyncPending ? 'pendiente' : bookingDealId ? 'completado' : 'no_aplica',
+            ...(bookingDealId ? {bitrix_responsable_id:booking.crmSync?.responsibleId || '',
+              bitrix_responsable_sync:booking.crmSync?.reviewRequired ? 'revision_requerida' : crmSyncPending ? 'pendiente' : 'completado'} : {}) } });
         } catch (error) {
           if (error.message === 'SLOT_UNAVAILABLE') {
             await setAttributes(contactId, { bitrix_reserva_pendiente: 'no' });

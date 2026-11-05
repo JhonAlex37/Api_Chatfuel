@@ -1,3 +1,12 @@
+# V1.0.7 - 2026-11-05
+
+- Conserva la agenda independiente incorporada por Juan-David-A-C en V1.0.6.
+- Actualiza responsable y etapa según el dueño verificado de la cita creada.
+- Verifica ambos campos y recupera pendientes desde MySQL sin duplicar eventos.
+- Respeta reasignaciones humanas y detiene reintentos ante eventos modificados.
+- Retoma consultas pausadas automáticamente y vuelve a validar horarios vencidos.
+- Recupera citas confirmadas después de vencer la sesión, sin generar otra reserva.
+
 # V1.0.6 - 2026-11-05
 
 - Integra perfiles y agenda en este servicio con Bitrix directo y MySQL propio.

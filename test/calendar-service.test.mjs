@@ -32,34 +32,48 @@ function memoryStore() {
     async insertPending(row) { bookings.set(row.id,structuredClone({...row,createdAt:new Date(NOW).toISOString()})); },
     async confirm(id,eventId,response) { Object.assign(bookings.get(id),{status:'confirmed',bitrixEventId:eventId,response:structuredClone(response)}); },
     async saveSync(id,response) { bookings.get(id).response=structuredClone(response); },
+    async pendingCrmAppointments(at) { return [...bookings.values()].filter(row=>row.status==='confirmed'
+      && row.response?.crmSync?.requiresResponsible && row.response.crmSync.status==='pending'
+      && !row.response.crmSync.reviewRequired && (!row.response.crmSync.nextAttemptAt || row.response.crmSync.nextAttemptAt<=at)).map(row=>row.id); },
+    async hasNewerBooking(row) { return [...bookings.values()].some(other=>other.id!==row.id && other.status==='confirmed'
+      && other.response?.crmSync?.requiresResponsible && other.response.crmSync.dealId===row.response.crmSync.dealId
+      && other.createdAt>=row.createdAt); },
     async claimComment(hash) { if(comments.has(hash)) return false;comments.add(hash);return true; },
     async confirmComment() {},
   };
 }
-function fixture(store = memoryStore()) {
+function fixture(store = memoryStore(), pool = advisors) {
   let failCreate=false, failStage=false, stage='C370:NEW', category='370', omitCalendar=false;
+  let responsible='99', ignoreResponsible=false, blockedOwner=null, eventOverride={}, time=NOW;
   let registered = {id_negociacion:'777'};
   const calls=[], events=[];
   const database={scheduling:store,findClienteByPhone:async()=>registered};
   const bitrix={call:async(method,params)=>{
     calls.push({method,params});
-    if(method==='calendar.accessibility.get') return omitCalendar ? {} : {'10':[]};
+    if(method==='calendar.accessibility.get') return omitCalendar ? {} : Object.fromEntries(pool.map(a=>[a.bitrixUserId,
+      a.bitrixUserId===blockedOwner ? [{DATE_FROM:'2026-11-03T09:00:00-05:00',DATE_TO:'2026-11-03T09:10:00-05:00'}] : []]));
     if(method==='calendar.event.get') return structuredClone(events);
+    if(method==='calendar.event.getbyid') return {...structuredClone(events.find(e=>e.ID===String(params.id))),...eventOverride};
     if(method==='calendar.event.add') {
       const id=String(100+events.length);
-      events.push({ID:id,OWNER_ID:String(params.ownerId),DESCRIPTION:params.description,DATE_FROM:params.from,DATE_TO:params.to});
+      events.push({ID:id,CAL_TYPE:'user',DELETED:'N',OWNER_ID:String(params.ownerId),DESCRIPTION:params.description,
+        DATE_FROM:params.from,DATE_TO:params.to,TZ_FROM:'America/Bogota',TZ_TO:'America/Bogota',UF_CRM_CAL_EVENT:params.crm_fields||null});
       if(failCreate) throw new Error('Lost response');
       return id;
     }
-    if(method==='crm.deal.get') return {ID:'777',CATEGORY_ID:category,STAGE_ID:stage};
-    if(method==='crm.deal.update') { if(failStage) throw new Error('CRM unavailable');stage=params.fields.STAGE_ID;return true; }
+    if(method==='crm.deal.get') return {ID:'777',CATEGORY_ID:category,STAGE_ID:stage,ASSIGNED_BY_ID:responsible,CLOSED:'N'};
+    if(method==='crm.deal.update') { if(failStage) throw new Error('CRM unavailable');stage=params.fields.STAGE_ID;
+      if(!ignoreResponsible && params.fields.ASSIGNED_BY_ID) responsible=String(params.fields.ASSIGNED_BY_ID);return true; }
     if(method==='crm.timeline.comment.add') return '600';
     throw new Error('Unexpected method: '+method);
   }};
-  const service=createSchedulingService({database,bitrix,advisors,now:()=>NOW});
+  const restart=()=>createSchedulingService({database,bitrix,advisors:pool,now:()=>time});
+  const service=restart();
   return {service,database,store,calls,events,async profile(phone='573000000001'){
     const result=await service.upsert({phone,contactName:'Prueba simulada'});return result.clientId;
-  },get stage(){return stage;},set stage(v){stage=v;},set category(v){category=v;},set failCreate(v){failCreate=v;},
+  },restart,advance(ms){time+=ms;},get responsible(){return responsible;},set responsible(v){responsible=v;},
+  set ignoreResponsible(v){ignoreResponsible=v;},set blockedOwner(v){blockedOwner=v;},set eventOverride(v){eventOverride=v;},
+  get stage(){return stage;},set stage(v){stage=v;},set category(v){category=v;},set failCreate(v){failCreate=v;},
   set failStage(v){failStage=v;},set registered(v){registered=v;},set omitCalendar(v){omitCalendar=v;}};
 }
 async function scenarios(t, create) {
@@ -74,6 +88,8 @@ async function scenarios(t, create) {
     const body={...request,bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'};
     const result=await f.service.book(code,body,'booking-1');
     assert.equal(result.data.crmSync.status,'completed');assert.equal(f.stage,'C370:EXECUTING');
+    assert.equal(f.responsible,'10');assert.equal(result.data.crmSync.responsibleId,'10');
+    assert.deepEqual(f.calls.find(c=>c.method==='crm.deal.update').params.fields,{STAGE_ID:'C370:EXECUTING',ASSIGNED_BY_ID:'10'});
     const add=f.calls.find(c=>c.method==='calendar.event.add');assert.deepEqual(add.params.crm_fields,['D_777']);
     assert.equal((await f.store.getByKey('booking-1')).status,'confirmed');
     assert.ok(f.calls.findIndex(c=>c.method==='crm.deal.update')>f.calls.findIndex(c=>c.method==='calendar.event.add'));
@@ -130,6 +146,37 @@ async function scenarios(t, create) {
     f.database.findClienteByPhone=async()=>{throw new Error('TELEFONO_AMBIGUO');};
     await assert.rejects(f.service.book(code,{...request,bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'},'ambiguous'),/TELEFONO_AMBIGUO/);
   });
+  await t.test('un fallo de responsable se recupera después de reiniciar sin volver a reservar',async()=>{
+    const f=await create();const code=await f.profile();f.failStage=true;
+    const result=await f.service.book(code,{...request,bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'},'responsible-retry');
+    assert.equal(result.data.status,'confirmed');assert.equal(result.data.crmSync.status,'pending');
+    assert.equal(await f.restart().retryPendingCrm(),0);
+    f.failStage=false;f.advance(31_000);
+    assert.equal(await f.restart().retryPendingCrm(),1);
+    assert.equal((await f.store.getAppointment(result.data.appointmentId)).response.crmSync.status,'completed');
+    assert.equal(f.responsible,'10');assert.equal(f.events.length,1);
+  });
+  await t.test('verifica el responsable leído y reintenta si Bitrix no aplicó el cambio',async()=>{
+    const f=await create();const code=await f.profile();f.ignoreResponsible=true;
+    const result=await f.service.book(code,{...request,bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'},'responsible-verify');
+    assert.equal(result.data.crmSync.status,'pending');assert.equal(f.responsible,'99');
+    f.ignoreResponsible=false;f.advance(31_000);await f.service.retryPendingCrm();
+    assert.equal(f.responsible,'10');assert.equal(f.events.length,1);
+  });
+  await t.test('respeta una reasignación humana posterior al fallo',async()=>{
+    const f=await create();const code=await f.profile();f.failStage=true;
+    const result=await f.service.book(code,{...request,bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'},'responsible-manual');
+    f.failStage=false;f.responsible='555';f.advance(31_000);await f.service.retryPendingCrm();
+    const saved=await f.store.getAppointment(result.data.appointmentId);
+    assert.equal(saved.response.crmSync.reviewRequired,true);assert.equal(f.responsible,'555');
+    assert.equal(f.events.length,1);assert.equal(await f.service.retryPendingCrm(),0);
+  });
+  await t.test('un evento eliminado no reasigna la negociación',async()=>{
+    const f=await create();const code=await f.profile();f.eventOverride={DELETED:'Y'};
+    const result=await f.service.book(code,{...request,bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'},'responsible-deleted');
+    assert.equal(result.data.crmSync.reviewRequired,true);assert.equal(f.responsible,'99');
+    assert.equal(f.calls.filter(c=>c.method==='crm.deal.update').length,0);
+  });
   await t.test('reserva heredada sin fila local nunca se recrea',async()=>{
     const f=await create();const code=await f.profile();
     await assert.rejects(f.service.book(code,{...request,resumeOnly:true},'legacy'),/LEGACY_BOOKING_REVIEW_REQUIRED/);
@@ -163,12 +210,28 @@ test('configuración rechaza asesores duplicados o incompletos',()=>{
   assert.deepEqual(readAdvisors({APPOINTMENT_ADVISORS_JSON:JSON.stringify(advisors)}),advisors);
 });
 
+test('asigna a Tatiana usando el usuario del evento realmente creado',async()=>{
+  const tatiana=[{id:'tatiana',name:'Asesora de prueba',bitrixUserId:'19922'}];
+  const f=fixture(undefined,tatiana);const code=await f.profile();
+  const result=await f.service.book(code,{...request,advisorId:'tatiana',bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'},'tatiana');
+  assert.equal(result.data.crmSync.responsibleId,'19922');assert.equal(f.responsible,'19922');
+});
+
+test('el responsable corresponde al asesor disponible al confirmar, no al ofrecido antes',async()=>{
+  const pool=[...advisors,{id:'advisor-b',name:'Segundo asesor',bitrixUserId:'20'}];
+  const f=fixture(undefined,pool);const code=await f.profile();f.blockedOwner='10';
+  const result=await f.service.book(code,{...request,bitrixDealId:'777',bitrixStageId:'C370:EXECUTING'},'changed-advisor');
+  assert.equal(result.data.crmSync.responsibleId,'20');assert.equal(f.events[0].OWNER_ID,'20');
+  assert.equal(f.responsible,'20');
+});
+
 test('Chatfuel recorre la agenda propia completa sin HTTP hacia otro CRM',async()=>{
+  let turnNow=NOW;
   const f=fixture();
   const id='wa_999999999999_888888888888_573000000001';
   const fields={nombre_completo:'Persona simulada',ciudad_municipio:'Bogotá',obligacion_vivienda_activa:'si'};
   const secret='secreto-local-exclusivo-para-test-123456789';
-  const handler=createHandler({database:f.database,scheduling:f.service,now:()=>NOW,
+  const handler=createHandler({database:f.database,scheduling:f.service,now:()=>turnNow,
     env:{CHATFUEL_BOT_ID:'mock',CHATFUEL_API_TOKEN:'mock',CHATFUEL_BOOKING_SECRET:secret},
     fetchImpl:async(url,init)=>{
       assert.equal(url,'https://panel.chatfuel.com/graphql','el único HTTP del conector es Chatfuel');
@@ -186,12 +249,21 @@ test('Chatfuel recorre la agenda propia completa sin HTTP hacia otro CRM',async(
     return result.json();
   }
   assert.match((await step('start')).message,/mañana/);
+  turnNow+=2*60*60_000;f.advance(2*60*60_000);
   await step('step','mañana');await step('step','1');
+  turnNow+=31*60_000;f.advance(31*60_000);
+  assert.match((await step('step','1')).message,/horarios libres/);
   assert.match((await step('step','1')).message,/Confirmas/);
   assert.equal(f.events.length,0);
+  turnNow+=31*60_000;f.advance(31*60_000);
+  assert.match((await step('step','sí')).message,/horarios libres/);
+  assert.equal(f.events.length,0);
+  await step('step','1');
   const result=await step('step','sí');
   assert.match(result.message,/quedó agendada/);assert.equal(f.events.length,1);
   assert.equal(fields.bitrix_negociacion_id,'777');assert.equal(f.stage,'C370:EXECUTING');
+  assert.equal(fields.bitrix_responsable_id,'10');assert.equal(fields.bitrix_responsable_sync,'completado');
+  turnNow+=2*60*60_000;f.advance(2*60*60_000);
   await step('step','sí');assert.equal(f.events.length,1);
 });
 

@@ -1,4 +1,4 @@
-# Api_Chatfuel — V1.0.6
+# Api_Chatfuel — V1.0.7
 
 Servicio propio de Chatfuel con **MySQL y conexión directa a Bitrix24**.
 El registro, perfiles, disponibilidad, reservas y cambios de etapa se resuelven
@@ -18,6 +18,9 @@ WhatsApp → Chatfuel → Api_Chatfuel → Bitrix24
 - Busca la negociación por teléfono completo en `clientes` antes de reservar.
 - Crea el evento con `calendar.event.add` y `crm_fields: ["D_ID"]` si encuentra una coincidencia.
 - Guarda la cita confirmada antes de mover la negociación a `C370:EXECUTING`.
+- Verifica el evento creado y actualiza etapa y responsable juntos, con el dueño real del calendario.
+- Persiste fallos de sincronización y reintenta cada 30 segundos, sin volver a crear citas.
+- Retoma consultas pausadas: conserva datos y franja y vuelve a verificar horarios vencidos antes de reservar.
 - Sin registro del teléfono, reserva sin vincular ni cambiar negociaciones.
 - Persiste la reserva pendiente antes de llamar a Bitrix; recupera respuestas perdidas sin crear otro evento.
 - Conserva la atención por IA, transferencias a humanos y recuperación de mensajes sin asignar.
@@ -82,7 +85,7 @@ Una cita incierta bloquea su intervalo hasta verificarse.
 GitHub: `JhonAlex37/Api_Chatfuel`, rama `main`; cada colaborador usa su propia cuenta.
 Servicio: https://apichatfuel-production.up.railway.app
 
-Después del push, `/health` debe indicar `version: "1.0.6"` y
+Después del push, `/health` debe indicar `version: "1.0.7"` y
 `calendar.independent: true`. La carpeta temporal `AI-First-One/` está excluida
 de Git y Docker y se puede eliminar: no forma parte del arranque ni de las pruebas.
 

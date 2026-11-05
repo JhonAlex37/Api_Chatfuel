@@ -66,6 +66,24 @@ export function createSchedulingStore(pool, executor = pool) {
       await executor.execute("UPDATE chatfuel_citas SET estado='confirmed',bitrix_evento_id=?,respuesta=? WHERE id=?", [eventId, JSON.stringify(response), id]);
     },
     async saveSync(id, response) { await executor.execute('UPDATE chatfuel_citas SET respuesta=? WHERE id=?', [JSON.stringify(response), id]); },
+    async pendingCrmAppointments(at) {
+      const [rows] = await executor.execute(`SELECT id FROM chatfuel_citas WHERE estado='confirmed' AND bitrix_evento_id IS NOT NULL
+        AND JSON_UNQUOTE(JSON_EXTRACT(respuesta,'$.crmSync.stageId'))='C370:EXECUTING'
+        AND JSON_UNQUOTE(JSON_EXTRACT(respuesta,'$.crmSync.status'))='pending'
+        AND JSON_UNQUOTE(JSON_EXTRACT(respuesta,'$.crmSync.requiresResponsible'))='true'
+        AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(respuesta,'$.crmSync.reviewRequired')),'false')<>'true'
+        AND (JSON_EXTRACT(respuesta,'$.crmSync.nextAttemptAt') IS NULL
+          OR JSON_UNQUOTE(JSON_EXTRACT(respuesta,'$.crmSync.nextAttemptAt'))<=?)
+        ORDER BY creado_en LIMIT 5`, [at]);
+      return rows.map(row=>row.id);
+    },
+    async hasNewerBooking(row) {
+      const [rows] = await executor.execute(`SELECT id FROM chatfuel_citas WHERE estado='confirmed' AND id<>?
+        AND JSON_UNQUOTE(JSON_EXTRACT(respuesta,'$.crmSync.dealId'))=?
+        AND JSON_UNQUOTE(JSON_EXTRACT(respuesta,'$.crmSync.requiresResponsible'))='true'
+        AND creado_en>=? LIMIT 1`, [row.id,String(row.response.crmSync.dealId),new Date(row.createdAt)]);
+      return rows.length>0;
+    },
     async claimComment(hash, dealId) {
       const [result] = await executor.execute('INSERT IGNORE INTO chatfuel_comentarios(huella,negociacion_id) VALUES(?,?)', [hash, dealId]);
       return result.affectedRows === 1;

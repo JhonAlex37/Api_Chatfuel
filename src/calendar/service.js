@@ -4,6 +4,7 @@ import { phoneVariants } from '../phone.js';
 import { bogotaToday, candidateDates, parseBitrixDate, weekdayForDate } from './appointmentAvailability.js';
 import { calculateAdvisorDateSlots } from './appointmentAdvisorAvailability.js';
 import { requireBitrixEventId } from './appointmentBooking.js';
+import { confirmedCalendarOwner } from './confirmedEvent.js';
 
 export const APPOINTMENT_STAGE = 'C370:EXECUTING';
 const fail = code => { throw Object.assign(new Error(code), { code, retryable: false }); };
@@ -93,7 +94,8 @@ export function createSchedulingService({ database, bitrix, calendar = bitrix, a
     return { ok: true, data: { source: 'bitrix_accessibility', days: result, slots: result.flatMap(d => d.slots) } };
   }
   async function syncCrm(id) {
-    return store.withLock('sync:' + id, async db => {
+    const initial = await store.getAppointment(id);
+    return store.withLock('sync:' + (initial?.response?.crmSync?.dealId || id), async db => {
       const row = await db.getAppointment(id);
       if (!row || row.status !== 'confirmed' || !row.bitrixEventId) fail('APPOINTMENT_NOT_CONFIRMED');
       const sync = row.response?.crmSync;
@@ -101,15 +103,33 @@ export function createSchedulingService({ database, bitrix, calendar = bitrix, a
       // Never allow legacy/imported stages to move a deal to another pipeline.
       if (sync.stageId !== APPOINTMENT_STAGE) return sync;
       let outcome;
+      const attempts = Number(sync.attempts || 0) + 1;
       try {
-        const current = await deal(String(sync.dealId));
-        if (current.STAGE_ID !== APPOINTMENT_STAGE) {
-          if (sync.fromStageId && current.STAGE_ID !== sync.fromStageId) fail('DEAL_STAGE_CHANGED');
-          if (await bitrix.call('crm.deal.update', { id: sync.dealId, fields: { STAGE_ID: APPOINTMENT_STAGE } }) !== true) fail('STAGE_NOT_CONFIRMED');
-          if ((await deal(String(sync.dealId))).STAGE_ID !== APPOINTMENT_STAGE) fail('STAGE_NOT_CONFIRMED');
+        let owner = null;
+        if (sync.requiresResponsible) {
+          if (await db.hasNewerBooking(row)) fail('NEWER_BOOKING_EXISTS');
+          const event = await calendar.call('calendar.event.getbyid', { id:row.bitrixEventId });
+          owner = confirmedCalendarOwner(row,event,advisors);
         }
-        outcome = { ...sync, status: 'completed' };
-      } catch { outcome = { ...sync, status: 'pending' }; }
+        const current = await deal(String(sync.dealId));
+        if (current.CLOSED === 'Y' || ['C370:WON','C370:LOSE'].includes(current.STAGE_ID)
+          || (sync.fromStageId && ![sync.fromStageId,APPOINTMENT_STAGE].includes(current.STAGE_ID))) fail('DEAL_STAGE_CHANGED');
+        if (owner && ![String(sync.fromResponsibleId),owner].includes(String(current.ASSIGNED_BY_ID))) fail('DEAL_RESPONSIBLE_CHANGED');
+        if (current.STAGE_ID !== APPOINTMENT_STAGE || (owner && String(current.ASSIGNED_BY_ID) !== owner)) {
+          if (await bitrix.call('crm.deal.update', { id: sync.dealId,
+            fields: { STAGE_ID:APPOINTMENT_STAGE, ...(owner ? {ASSIGNED_BY_ID:owner} : {}) } }) !== true) fail('STAGE_NOT_CONFIRMED');
+          const verified = await deal(String(sync.dealId));
+          if (verified.STAGE_ID !== APPOINTMENT_STAGE || (owner && String(verified.ASSIGNED_BY_ID) !== owner)) fail('STAGE_NOT_CONFIRMED');
+        }
+        outcome = { ...sync, status:'completed', ...(owner ? {responsibleId:owner} : {}),
+          attempts,reviewRequired:false,lastError:null,nextAttemptAt:null };
+      } catch (error) {
+        const code = /^[A-Z_]{1,64}$/.test(error.code || '') ? error.code : 'BITRIX_SYNC_UNAVAILABLE';
+        const reviewRequired = error.reviewRequired === true || ['DEAL_STAGE_CHANGED','DEAL_RESPONSIBLE_CHANGED',
+          'NEWER_BOOKING_EXISTS','INVALID_BITRIX_DEAL'].includes(code) || attempts >= 8;
+        outcome = { ...sync, status:'pending',attempts,reviewRequired,lastError:code,
+          nextAttemptAt:new Date(now()+Math.min(1_800_000,30_000*2**Math.min(attempts-1,6))).toISOString() };
+      }
       await db.saveSync(id, { ...row.response, crmSync: outcome });
       return outcome;
     });
@@ -163,11 +183,15 @@ export function createSchedulingService({ database, bitrix, calendar = bitrix, a
       const profile = await db.getProfile(code);
       if (!profile) fail('LEAD_NOT_FOUND');
       if (!advisors.some(a => a.id === body.advisorId)) fail('INVALID_ADVISOR');
-      let originalStage = null;
+      let originalStage = null, originalResponsible = null;
       if (requestedDeal) {
         const registered = await database.findClienteByPhone(profile.phone);
         if (String(registered?.id_negociacion) !== requestedDeal) fail('INVALID_BITRIX_BINDING');
-        originalStage = (await deal(requestedDeal)).STAGE_ID;
+        const original = await deal(requestedDeal);
+        originalStage = original.STAGE_ID;
+        if (original.CLOSED === 'Y' || ['C370:WON','C370:LOSE'].includes(originalStage)) fail('DEAL_STAGE_CHANGED');
+        originalResponsible = String(original.ASSIGNED_BY_ID);
+        if (!validId(originalResponsible)) fail('INVALID_DEAL_RESPONSIBLE');
       }
       return db.withLock('day:' + parsed.date, async locked => {
         const busy = await calendars(parsed.date, parsed.date, locked);
@@ -180,6 +204,7 @@ export function createSchedulingService({ database, bitrix, calendar = bitrix, a
         const id = randomUUID(), marker = `CHATFUEL_APPOINTMENT:${id}`;
         const response = { marker, crmSync: requestedDeal ? {
           dealId: requestedDeal, stageId: APPOINTMENT_STAGE, fromStageId: originalStage, status: 'pending',
+          requiresResponsible:true,fromResponsibleId:originalResponsible,
         } : null };
         const pending = { id, clientCode: code, advisorId: advisor.id, bitrixUserId: advisor.bitrixUserId, key,
           startAt: slot.startAt, endAt: slot.endAt, request: body, response, status: 'pending' };
@@ -202,6 +227,16 @@ export function createSchedulingService({ database, bitrix, calendar = bitrix, a
   }
   return {
     availability, book, resolve, upsert, syncCrm,
+    async getBookingState({appointmentId,key,clientCode}) {
+      const row = appointmentId ? await store.getAppointment(appointmentId) : key ? await store.getByKey(key) : null;
+      if (row && row.clientCode !== clientCode) fail('IDEMPOTENCY_KEY_CONFLICT');
+      return row;
+    },
+    async retryPendingCrm() {
+      const ids = await store.pendingCrmAppointments(new Date(now()).toISOString());
+      for (const id of ids) await syncCrm(id);
+      return ids.length;
+    },
     async request(path, body, key) {
       if (path === '/api/v1/leads/resolve') return resolve(body);
       if (path === '/api/webhooks/prospecting-bot/lead') return upsert(body);
@@ -213,4 +248,19 @@ export function createSchedulingService({ database, bitrix, calendar = bitrix, a
       return match[2] === 'availability' ? availability(decodeURIComponent(match[1]), body) : book(decodeURIComponent(match[1]), body, key);
     },
   };
+}
+
+export function startCrmSyncWorker(service, { logger = console, intervalMs = 30_000 } = {}) {
+  let running = false;
+  const run = async () => {
+    if (running) return;
+    running = true;
+    try { await service.retryPendingCrm(); }
+    catch { logger.error({ evento:'sincronizacion_responsable',causa:'RETRY_FAILED' }); }
+    finally { running = false; }
+  };
+  void run();
+  const timer = setInterval(() => { void run(); },intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }

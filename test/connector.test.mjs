@@ -300,9 +300,22 @@ test('tampered and expired selections cannot book', async () => {
     await prepareOptions(f);
     if (mode === 'tampered') f.fields.bitrix_agenda_estado = `${f.fields.bitrix_agenda_estado}x`;
     else f.advance(31 * 60_000);
-    assert.match((await f.request('step', '1')).message, /venció/);
+    const resumed = await f.request('step','1');
+    assert.doesNotMatch(resumed.message,/venció/);
+    assert.equal(resumed.error,undefined);
     assert.equal(f.bookings().length, 0);
   }
+});
+
+test('una franja respondida después de treinta minutos retoma con disponibilidad nueva',async()=>{
+  const f=fixture();
+  await f.request('start');
+  f.advance(2*60*60_000);
+  const response=await f.request('step','Tarde');
+  assert.equal(response.error,undefined);
+  assert.match(response.message,/Qué día/);
+  assert.doesNotMatch(response.message,/venció|no se ha confirmado/);
+  assert.equal(f.bookings().length,0);
 });
 
 test('lost booking response retries the same reservation with the same idempotency key', async () => {
