@@ -15,7 +15,9 @@ Repositorio: https://github.com/JhonAlex37/Api_Chatfuel
   evento creado y controla reintentos y comentarios repetidos.
 - Escucha cambios de chats mediante WebSocket y recupera pendientes al conectar.
 
-Versión actual: **1.0.4**. Antes de reservar, consulta el teléfono en MySQL y vincula la negociación encontrada al calendario. Después de confirmar la cita solicita `C370:EXECUTING`; sin coincidencia conserva el flujo anterior. Ver [vinculación de citas](docs/VINCULACION-CITAS.md).
+Versión actual: **1.0.5**. Las consultas seguras reintentan fallos temporales hasta tres veces, durante un máximo de ocho segundos. Un error antes de reservar conserva los datos y permite retomar sin anunciar una cita pendiente. Las reservas inciertas mantienen su verificación e idempotencia.
+
+Antes de reservar, consulta el teléfono en MySQL y vincula la negociación encontrada al calendario. Después de confirmar la cita solicita `C370:EXECUTING`; sin coincidencia conserva el flujo anterior. Ver [vinculación de citas](docs/VINCULACION-CITAS.md).
 
 Con `INCOMING_RECOVERY_ENABLED=true`, el observador
 recupera mensajes entrantes recientes que siguen sin IA asignada en etapa Nueva.

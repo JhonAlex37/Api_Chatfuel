@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual, createHash } from 'node:crypto';
 
-export const RELEASE_VERSION = '1.0.4';
+export const RELEASE_VERSION = '1.0.5';
 
 const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa',
   'tipo_obligacion', 'banco_entidad', 'estado_pago', 'necesidad_principal',
@@ -231,18 +231,35 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
     return { phone, fields };
   }
   async function crm(path, body, idempotencyKey) {
-    const response = await fetchImpl(`${crmBase.replace(/\/$/, '')}${path}`, {
-      method: 'POST', signal: AbortSignal.timeout(15_000),
-      headers: { Authorization: `Bearer ${env.AI_FIRST_ONE_APPOINTMENTS_TOKEN}`, 'Content-Type': 'application/json',
-        ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
-      body: JSON.stringify(body),
-    });
-    const result = await response.json();
-    if (!response.ok || result.ok !== true) {
-      const error = new Error(response.status === 409 && result.error?.code === 'SLOT_UNAVAILABLE' ? 'SLOT_UNAVAILABLE' : 'CRM_UNAVAILABLE');
-      throw error;
+    // Solo consultas seguras: no repetir reservas o comentarios ante una respuesta perdida.
+    const canRetry = path === '/api/v1/leads/resolve' || path.endsWith('/availability');
+    const deadline = Date.now() + 8000;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const response = await fetchImpl(`${crmBase.replace(/\/$/, '')}${path}`, {
+          method: 'POST', signal: AbortSignal.timeout(canRetry ? Math.max(1, Math.min(3000, deadline - Date.now())) : 15_000),
+          headers: { Authorization: `Bearer ${env.AI_FIRST_ONE_APPOINTMENTS_TOKEN}`, 'Content-Type': 'application/json',
+            ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
+          body: JSON.stringify(body),
+        });
+        const result = await response.json().catch(() => null);
+        if (!response.ok || result?.ok !== true) {
+          const code = response.status === 401 || response.status === 403 ? 'CRM_UNAUTHORIZED'
+            : response.status === 409 && result?.error?.code === 'SLOT_UNAVAILABLE' ? 'SLOT_UNAVAILABLE'
+            : response.ok && !result ? 'CRM_INVALID_RESPONSE' : 'CRM_UNAVAILABLE';
+          const retryAfter = Number(response.headers.get('retry-after'));
+          throw Object.assign(new Error(code), {
+            retryable: response.status === 408 || response.status === 429 || response.status >= 500 || (response.ok && !result),
+            retryAfterMs: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0,
+          });
+        }
+        return result;
+      } catch (error) {
+        const delayMs = Math.max(250 * (attempt + 1), error.retryAfterMs || 0);
+        if (!canRetry || error.retryable === false || attempt >= 2 || Date.now() + delayMs >= deadline) throw error;
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
     }
-    return result;
   }
   async function reply(contactId, state, message, { done = false, fields = {}, human = false } = {}) {
     const signed = encode(contactId, state);
@@ -486,10 +503,12 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
       message: 'Este es un chat de prueba. La conexión de agenda respondió; no se creó ninguna negociación ni cita real. En WhatsApp la asistente ofrece organizar la llamada y consulta los horarios al continuar.', done: 'si', human: 'no' });
     if (typeof contactId !== 'string' || !/^wa_\d+_\d+_\d{8,15}$/.test(contactId)
       || !['start', 'step'].includes(operation)) return json({ error: 'INVALID_CONTACT_OR_OPERATION' }, 422);
-    try {
+    let bookingMayExist = true;
+    const run = async () => {
       const { phone, fields } = await contact(contactId);
       const answer = String(fields.bitrix_agenda_respuesta ?? '').trim();
       const state = decode(fields.bitrix_agenda_estado, contactId);
+      bookingMayExist = yes(fields.bitrix_reserva_pendiente) || ['booking', 'confirmed', 'check_pending'].includes(state?.step);
       if (state?.step === 'confirmed') {
         // Retrying a stage update must never request another calendar event.
         let pending = state.crmSyncPending === true;
@@ -589,6 +608,7 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
           }
         }
         const key = `chatfuel-${createHash('sha256').update(`${contactId}|${state.clientCode}|${state.slot.startAt}|${state.slot.advisorId}`).digest('hex')}`;
+        bookingMayExist = true;
         await setAttributes(contactId, { bitrix_reserva_pendiente: 'si',
           bitrix_agenda_estado: encode(contactId, { ...state, step: 'booking', bookingDealId }) });
         try {
@@ -614,15 +634,24 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
         } catch (error) {
           if (error.message === 'SLOT_UNAVAILABLE') {
             await setAttributes(contactId, { bitrix_reserva_pendiente: 'no' });
+            bookingMayExist = false;
             return options(contactId, state.clientCode, state.excludedStarts || [state.slot.startAt], { ...state, date: state.date || dateAt(state.slot.startAt) });
           }
           throw error;
         }
       }
       return reply(contactId, { step: 'restart' }, 'Puedes pedirme que volvamos a revisar los horarios para la llamada.', { done: true });
-    } catch {
+    };
+    try { return await run(); }
+    catch (error) {
+      const cause = ['CRM_UNAUTHORIZED', 'CRM_UNAVAILABLE', 'CRM_INVALID_RESPONSE', 'CHATFUEL_UNAVAILABLE',
+        'ADVISOR_NOT_ASSIGNED', 'LEAD_NOT_PERSISTED'].includes(error.message) ? error.message : 'INTEGRATION_UNAVAILABLE';
+      if (!bookingMayExist) return json({
+        message: 'No pude consultar la agenda en este momento. Conservé tus datos y todavía no se ha solicitado una cita. Escríbeme «agendar» para retomarlo 🗓️.',
+        done: 'si', human: 'no', error: 'BOOKING_LOOKUP_FAILED', cause,
+      });
       // A failure may happen after Bitrix accepted a booking; never claim it was not booked.
-      return json({ message: 'No pude verificar el estado de la agenda en este momento. Evita solicitar otra cita hasta que confirmemos si la reserva se completó. Puedes pedir ayuda a un asesor.', done: 'si', human: 'no', error: 'BOOKING_CHECK_REQUIRED' });
+      return json({ message: 'No pude verificar el estado de la agenda en este momento. Evita solicitar otra cita hasta que confirmemos si la reserva se completó. Puedes pedir ayuda a un asesor.', done: 'si', human: 'no', error: 'BOOKING_CHECK_REQUIRED', cause });
     }
   };
   handle.synchronizeHandoffs = synchronizeHandoffs;

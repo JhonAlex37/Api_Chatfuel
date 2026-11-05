@@ -24,7 +24,7 @@ const SLOTS = [
 function fixture({ initial = {}, bookingError = null, invalidBooking = false,
   human = false, live = true, failLead = false, latestText = 'Sí, quiero agendar una llamada',
   naturalStatus = 'closed', botReplied = true, staleHandoffIndex = false, previousReply = '', olderMessages = [], availabilitySlots = SLOTS,
-  database = null, stagePending = false } = {}) {
+  database = null, stagePending = false, resolveError = null, availabilityErrors = [] } = {}) {
   const fields = { nombre_completo: 'Persona de Prueba', ciudad_municipio: 'Bogotá',
     obligacion_vivienda_activa: 'si', ...initial };
   const calls = [];
@@ -63,10 +63,17 @@ function fixture({ initial = {}, bookingError = null, invalidBooking = false,
       return Response.json({ data });
     }
     if (url.endsWith('/prospecting-bot/lead')) return Response.json({ ok: !failLead, persisted: !failLead, clientId: failLead ? null : 'CLI-MOCK-ONLY' });
-    if (url.endsWith('/leads/resolve')) return Response.json({ ok: true, data: { clientCode: 'CLI-MOCK-ONLY', advisorAssigned: true, created: false } });
-    if (url.endsWith('/availability')) return Response.json({ ok: true, data: {
+    if (url.endsWith('/leads/resolve')) return resolveError
+      ? Response.json({ ok: false, error: { code: 'UNAUTHORIZED' } }, { status: resolveError })
+      : Response.json({ ok: true, data: { clientCode: 'CLI-MOCK-ONLY', advisorAssigned: true, created: false } });
+    if (url.endsWith('/availability')) {
+      const failure = availabilityErrors.shift();
+      if (failure === 'network') throw new TypeError('Synthetic network error');
+      if (failure) return Response.json({ ok: false }, { status: failure });
+      return Response.json({ ok: true, data: {
       source: 'bitrix_accessibility', slots: availabilitySlots.filter(s => !payload.excludeStarts.includes(s.startAt)),
-    } });
+      } });
+    }
     if (url.endsWith('/appointments')) {
       if (bookingError === 'conflict' && !failed) {
         failed = true;
@@ -101,6 +108,63 @@ async function prepareOptions(f) {
   await f.request('step', 'en la mañana');
   return f.request('step', '1');
 }
+
+test('una credencial rechazada tras confirmar el crédito conserva los datos sin anunciar una reserva', async () => {
+  const f = fixture({ initial: { nombre_completo: '', ciudad_municipio: '', obligacion_vivienda_activa: '' }, resolveError: 401 });
+  await f.request('start');
+  await f.request('step', 'Persona de Prueba');
+  await f.request('step', 'Bogotá');
+  const response = await f.request('step', 'Sí');
+  assert.equal(response.status, 200);
+  assert.equal(response.error, 'BOOKING_LOOKUP_FAILED');
+  assert.equal(response.cause, 'CRM_UNAUTHORIZED');
+  assert.match(response.message, /no se ha solicitado/);
+  assert.equal(f.fields.ciudad_municipio, 'Bogotá');
+  assert.equal(f.fields.obligacion_vivienda_activa, 'si');
+  assert.equal(f.bookings().length, 0);
+  assert.notEqual(f.fields.bitrix_reserva_pendiente, 'si');
+  assert.equal(f.calls.filter(c => c.url.endsWith('/leads/resolve')).length, 1);
+});
+
+test('las consultas de horarios toleran dos fallos temporales sin duplicar reservas', async () => {
+  const f = fixture({ availabilityErrors: [503, 'network'] });
+  await f.request('start');
+  const response = await f.request('step', 'en la mañana');
+  assert.equal(response.error, undefined);
+  assert.match(response.message, /Qué día/);
+  assert.equal(f.calls.filter(c => c.url.endsWith('/availability')).length, 3);
+  assert.equal(f.bookings().length, 0);
+});
+
+test('los fallos persistentes de consulta terminan con un mensaje recuperable y sin reservar', async () => {
+  const f = fixture({ availabilityErrors: [503, 503, 503, 503] });
+  await f.request('start');
+  const response = await f.request('step', 'en la mañana');
+  assert.equal(response.error, 'BOOKING_LOOKUP_FAILED');
+  assert.equal(f.calls.filter(c => c.url.endsWith('/availability')).length, 3);
+  assert.equal(f.bookings().length, 0);
+  assert.notEqual(f.fields.bitrix_reserva_pendiente, 'si');
+});
+
+test('un perfil rechazado no repite comentarios ni anuncia una reserva pendiente', async () => {
+  const f = fixture({ failLead: true });
+  const response = await f.request('start');
+  assert.equal(response.error, 'BOOKING_LOOKUP_FAILED');
+  assert.equal(f.calls.filter(c => c.url.endsWith('/prospecting-bot/lead')).length, 1);
+  assert.equal(f.bookings().length, 0);
+});
+
+test('un horario rechazado no queda como reserva incierta si falla la siguiente consulta', async () => {
+  const failures = [];
+  const f = fixture({ bookingError: 'conflict', availabilityErrors: failures });
+  await prepareOptions(f);
+  await f.request('step', '1');
+  failures.push(503, 503, 503);
+  const response = await f.request('step', 'sí');
+  assert.equal(response.error, 'BOOKING_LOOKUP_FAILED');
+  assert.equal(f.fields.bitrix_reserva_pendiente, 'no');
+  assert.equal(f.bookings().length, 1);
+});
 
 test('busca MySQL antes de reservar y envía negociación y etapa exactas', async () => {
   let lookups = 0;

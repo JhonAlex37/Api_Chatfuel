@@ -1,3 +1,11 @@
+# V1.0.5 - 2026-11-05
+
+- Reintenta hasta tres veces las consultas seguras ante fallos temporales, con un máximo de ocho segundos por consulta.
+- Captura también los errores asíncronos del perfilamiento y de la consulta de horarios.
+- Distingue una consulta fallida de una reserva que requiere verificación y conserva los datos para retomar.
+- Mantiene la confirmación explícita, las claves de idempotencia y la protección ante reservas inciertas.
+- Registra causas técnicas acotadas sin credenciales ni datos del cliente.
+
 # V1.0.4 - 2026-11-05
 
 - Busca en MySQL el teléfono antes de reservar y vincula su negociación al evento de calendario.

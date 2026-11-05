@@ -46,7 +46,10 @@ export function createApp({ bitrix, database, webhookToken = '', logger = consol
             logger.info?.({ evento: 'agenda_chatfuel',
               operacion: ['start', 'step'].includes(input.operation) ? input.operation : 'invalida',
               estado_http: response.status, etapa: typeof step === 'string' ? step : null,
-              finalizada: output.done === 'si', error: output.error || null, duracion_ms: Date.now() - startedAt });
+              finalizada: output.done === 'si', error: output.error || null,
+              causa: ['CRM_UNAUTHORIZED', 'CRM_UNAVAILABLE', 'CRM_INVALID_RESPONSE', 'CHATFUEL_UNAVAILABLE',
+                'ADVISOR_NOT_ASSIGNED', 'LEAD_NOT_PERSISTED', 'INTEGRATION_UNAVAILABLE'].includes(output.cause) ? output.cause : null,
+              duracion_ms: Date.now() - startedAt });
           } catch { /* El diagnóstico no debe cambiar la respuesta HTTP. */ }
         }
         for (const [key, value] of response.headers) res.setHeader(key, value);
