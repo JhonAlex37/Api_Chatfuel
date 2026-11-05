@@ -18,6 +18,7 @@ export function createApp({ bitrix, database, webhookToken = '', logger = consol
     try {
       const url = new URL(req.url, 'http://localhost');
       if (bookingHandler && ['/booking', '/sync-handoffs'].includes(url.pathname)) {
+        const startedAt = Date.now();
         const headers = new Headers();
         for (const [key, value] of Object.entries(req.headers)) {
           if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
@@ -31,13 +32,26 @@ export function createApp({ bitrix, database, webhookToken = '', logger = consol
             chunks.push(chunk);
           }
         }
+        const requestBody = Buffer.concat(chunks);
         const response = await bookingHandler(new Request(url, {
           method: req.method, headers,
-          ...(!['GET', 'HEAD'].includes(req.method) ? { body: Buffer.concat(chunks) } : {}),
+          ...(!['GET', 'HEAD'].includes(req.method) ? { body: requestBody } : {}),
         }));
+        const responseBody = Buffer.from(await response.arrayBuffer());
+        if (url.pathname === '/booking') {
+          try {
+            const input = JSON.parse(requestBody.toString('utf8'));
+            const output = JSON.parse(responseBody.toString('utf8'));
+            const step = output.state ? JSON.parse(Buffer.from(output.state.split('.')[0], 'base64url').toString('utf8')).step : null;
+            logger.info?.({ evento: 'agenda_chatfuel',
+              operacion: ['start', 'step'].includes(input.operation) ? input.operation : 'invalida',
+              estado_http: response.status, etapa: typeof step === 'string' ? step : null,
+              finalizada: output.done === 'si', error: output.error || null, duracion_ms: Date.now() - startedAt });
+          } catch { /* El diagnóstico no debe cambiar la respuesta HTTP. */ }
+        }
         for (const [key, value] of response.headers) res.setHeader(key, value);
         res.writeHead(response.status);
-        return res.end(Buffer.from(await response.arrayBuffer()));
+        return res.end(responseBody);
       }
       if (url.pathname === '/health' && req.method === 'GET') {
         try { await database.ping(); } catch { throw new AppError(503, 'DB_NO_DISPONIBLE', 'La base de datos no está disponible.'); }

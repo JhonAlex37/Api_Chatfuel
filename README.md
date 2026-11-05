@@ -15,7 +15,10 @@ Repositorio: https://github.com/JhonAlex37/Api_Chatfuel
   evento creado y controla reintentos y comentarios repetidos.
 - Escucha cambios de chats mediante WebSocket y recupera pendientes al conectar.
 
-Versión actual: **1.0.1**. La agenda reconoce un «sí» a la oferta inmediatamente
+Versión actual: **1.0.2**. La agenda evita iniciar dos veces el mismo diálogo
+cuando Chatfuel devuelve una búsqueda de contactos atrasada. El diagnóstico HTTP
+registra operación, etapa y duración, sin mensajes, teléfonos ni credenciales.
+La agenda reconoce un «sí» a la oferta inmediatamente
 anterior aunque la extracción de intención de la IA quede pendiente. Los mensajes
 de agenda incorporan emojis; la reserva exige elegir y confirmar un horario.
 El motor original de DalIA conserva sus preguntas y scoring. El scoring nuevo

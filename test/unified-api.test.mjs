@@ -11,9 +11,9 @@ function agenda(configured = true) {
     AI_FIRST_ONE_BASE_URL: 'https://crm.example.invalid', AI_FIRST_ONE_APPOINTMENTS_TOKEN: 'token-simulado',
   } : {}, fetchImpl: async () => { throw new Error('No se permiten servicios externos en estas pruebas'); } });
 }
-async function serve(t, bookingHandler) {
+async function serve(t, bookingHandler, logger = { error() {} }) {
   const rows = [];
-  const server = createApp({ bookingHandler, logger: { error() {} },
+  const server = createApp({ bookingHandler, logger,
     database: { ping: async () => {}, saveCliente: async row => rows.push(row) },
     bitrix: { getCliente: async id => ({ id_negociacion: id, telefono: '+573000000001' }) },
   });
@@ -42,7 +42,7 @@ test('la salud conjunta identifica la versión y comprueba MySQL y la configurac
   const response = await request('/health');
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.equal(body.version, '1.0.1');
+  assert.equal(body.version, '1.0.2');
   assert.equal(body.service, 'api-chatfuel');
   assert.equal(body.mysql.ok, true);
   assert.equal(body.handoff.enabled, false);
@@ -53,4 +53,18 @@ test('una agenda sin configurar se detecta en salud sin eliminar la ruta de regi
   assert.equal((await request('/health')).status, 503);
   assert.equal((await request('/registrar-cliente?id=123')).status, 200);
   assert.equal(rows.length, 1);
+});
+
+test('el diagnóstico de agenda conserva la respuesta y excluye datos y credenciales', async t => {
+  const records = [];
+  const state = Buffer.from(JSON.stringify({ step: 'city', contactId: 'contacto-privado' })).toString('base64url') + '.firma-privada';
+  const expected = { message: '¿En qué ciudad está Persona Privada?', done: 'no', state };
+  const { request } = await serve(t, async () => Response.json(expected), { error() {}, info: row => records.push(row) });
+  const response = await request('/booking', { method: 'POST', headers: { authorization: 'Bearer clave-privada' },
+    body: JSON.stringify({ operation: 'start', contactId: 'contacto-privado' }) });
+  assert.deepEqual(await response.json(), expected);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].etapa, 'city');
+  assert.equal(records[0].operacion, 'start');
+  assert.doesNotMatch(JSON.stringify(records), /privad|Persona|Bearer|firma/i);
 });

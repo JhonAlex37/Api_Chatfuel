@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual, createHash } from 'node:crypto';
 
-export const RELEASE_VERSION = '1.0.1';
+export const RELEASE_VERSION = '1.0.2';
 
 const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa',
   'tipo_obligacion', 'banco_entidad', 'estado_pago', 'necesidad_principal',
@@ -171,6 +171,7 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
   // Keep successful writes locally too, and use a separate schema marker so an
   // older deployment cannot alternate its legacy fingerprint with this one.
   const synchronizedProfiles = new Map();
+  const routedBookingIntents = new Map();
   const mac = data => createHmac('sha256', secret).update(data).digest('base64url');
   function encode(contactId, state) {
     const payload = Buffer.from(JSON.stringify({ ...state, contactId, expires: now() + 30 * 60_000 })).toString('base64url');
@@ -359,9 +360,14 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
             // AI-extracted attribute incorrectly classifies another answer as consent.
             if (!explicitBooking(incoming.text) && !acceptedOffer && !(capturedIntent && !confirmBooking(incoming.text))) continue;
             const intentHash = createHash('sha256').update(`${node.id}|${incoming.id}`).digest('hex');
-            if (fields.crm_30x_booking_intent_hash === intentHash) continue;
+            if (fields.crm_30x_booking_intent_hash === intentHash
+              || routedBookingIntents.get(node.id) === intentHash) continue;
             const routed = await graphql('mutation NaturalBookingFlow($botID:BotID!,$id:ConversationID!,$flowID:FlowID!){conversationFinishSendToFlow(botID:$botID,conversationID:$id,flowID:$flowID){id status}}', { botID, id: node.id, flowID: env.CHATFUEL_BOOKING_FLOW_ID });
             if (routed.conversationFinishSendToFlow.id !== node.id) throw new Error('BOOKING_ROUTE_FAILED');
+            // Las búsquedas pueden devolver atributos anteriores a la escritura.
+            // No iniciar otra vez el flujo mientras esa actualización se propaga.
+            routedBookingIntents.set(node.id, intentHash);
+            if (routedBookingIntents.size > 5000) routedBookingIntents.delete(routedBookingIntents.keys().next().value);
             await setAttributes(node.id, { crm_30x_booking_intent_hash: intentHash });
             handoffStatus.bookingFlowsStarted++;
             continue;

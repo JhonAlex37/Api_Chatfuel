@@ -410,6 +410,17 @@ test('stale or declined booking intent never routes an unrelated reply', async (
   }
 });
 
+test('la búsqueda atrasada no reinicia la agenda para el mismo mensaje', async () => {
+  const f = fixture({ staleHandoffIndex: true, initial: {
+    solicitud_agendamiento: 'si', texto_solicitud_agendamiento: 'Sí, quiero agendar una llamada',
+  } });
+  await f.handle.synchronizeHandoffs();
+  await f.handle.synchronizeHandoffs();
+  const routes = f.calls.filter(c => c.payload.query?.includes('mutation NaturalBookingFlow'));
+  assert.equal(routes.length, 1);
+  assert.equal(f.bookings().length, 0);
+});
+
 test('the observer leaves an active booking conversation in its current step', async () => {
   const f = fixture({ initial: { solicitud_agendamiento: 'si', texto_solicitud_agendamiento: 'Sí, quiero agendar una llamada' } });
   await prepareOptions(f);
