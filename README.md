@@ -15,7 +15,12 @@ Repositorio: https://github.com/JhonAlex37/Api_Chatfuel
   evento creado y controla reintentos y comentarios repetidos.
 - Escucha cambios de chats mediante WebSocket y recupera pendientes al conectar.
 
-Versión actual: **1.0.2**. La agenda evita iniciar dos veces el mismo diálogo
+Versión actual: **1.0.3**. Con `INCOMING_RECOVERY_ENABLED=true`, el observador
+recupera mensajes entrantes recientes que siguen sin IA asignada en etapa Nueva.
+Si otro proveedor conserva el control, primero toma la conversación y después
+la entrega a la IA. Requiere que Meta conceda a Chatfuel control y visibilidad.
+No interviene en chats abiertos con humanos, perfiles avanzados ni reservas.
+La agenda evita iniciar dos veces el mismo diálogo
 cuando Chatfuel devuelve una búsqueda de contactos atrasada. El diagnóstico HTTP
 registra operación, etapa y duración, sin mensajes, teléfonos ni credenciales.
 La agenda reconoce un «sí» a la oferta inmediatamente
@@ -69,6 +74,7 @@ el contenedor de prueba al terminar; no envía mensajes ni crea registros reales
 | `CHATFUEL_BOOKING_FLOW_ID` | Flujo de agenda de Chatfuel |
 | `APPOINTMENT_SAME_DAY_CUTOFF_HOUR` | Corte para ofrecer el mismo día; 12 por defecto |
 | `HANDOFF_SYNC_ENABLED` | Activa el observador cuando vale `true` |
+| `INCOMING_RECOVERY_ENABLED` | Recupera mensajes sin asignar; requiere el observador y permisos de control en Meta |
 | `PORT` | Puerto HTTP; 3000 por defecto |
 
 Configurar valores propios del servicio nuevo. Las referencias a variables

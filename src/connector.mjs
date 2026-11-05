@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual, createHash } from 'node:crypto';
 
-export const RELEASE_VERSION = '1.0.2';
+export const RELEASE_VERSION = '1.0.3';
 
 const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa',
   'tipo_obligacion', 'banco_entidad', 'estado_pago', 'necesidad_principal',
@@ -13,7 +13,8 @@ const ATTR = ['nombre_completo', 'ciudad_municipio', 'obligacion_vivienda_activa
   'rch_anos_pagando', 'rch_cuotas_atrasadas',
   'bitrix_agenda_estado', 'bitrix_agenda_respuesta', 'crm_30x_codigo', 'bitrix_reserva_pendiente',
   'crm_30x_handoff_hash', 'crm_30x_profile_comment_hash', 'last user freeform input',
-  'solicitud_agendamiento', 'texto_solicitud_agendamiento', 'crm_30x_booking_intent_hash'];
+  'solicitud_agendamiento', 'texto_solicitud_agendamiento', 'crm_30x_booking_intent_hash',
+  'crm_30x_incoming_recovery_hash'];
 const PROFILE = ATTR.filter(name => !name.startsWith('bitrix_') && !name.startsWith('crm_')
   && !['solicitud_agendamiento', 'texto_solicitud_agendamiento'].includes(name));
 const attributeMap = attributes => Object.fromEntries((attributes ?? []).map(({ attr, value }) =>
@@ -165,13 +166,16 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
   const configured = Boolean(botID && secret?.length >= 32 && env.CHATFUEL_API_TOKEN
     && crmBase?.startsWith('https://') && env.AI_FIRST_ONE_APPOINTMENTS_TOKEN);
   const handoffStatus = { enabled: env.HANDOFF_SYNC_ENABLED === 'true', connected: false,
-    lastSyncAt: null, synchronized: 0, bookingFlowsStarted: 0, lastError: null };
+    lastSyncAt: null, synchronized: 0, bookingFlowsStarted: 0, lastError: null,
+    incomingRecoveryEnabled: env.INCOMING_RECOVERY_ENABLED === 'true', incomingRecovered: 0,
+    incomingRecoveryLastError: null };
   let syncing = null;
   // Contact search can briefly return an old attribute snapshot after a write.
   // Keep successful writes locally too, and use a separate schema marker so an
   // older deployment cannot alternate its legacy fingerprint with this one.
   const synchronizedProfiles = new Map();
   const routedBookingIntents = new Map();
+  const incomingRecoveryAttempts = new Map();
   const mac = data => createHmac('sha256', secret).update(data).digest('base64url');
   function encode(contactId, state) {
     const payload = Buffer.from(JSON.stringify({ ...state, contactId, expires: now() + 30 * 60_000 })).toString('base64url');
@@ -193,7 +197,14 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
       body: JSON.stringify({ query, variables }),
     });
     const body = await response.json();
-    if (!response.ok || body.errors?.length || !body.data) throw new Error('CHATFUEL_UNAVAILABLE');
+    if (!response.ok || body.errors?.length || !body.data) {
+      const error = new Error('CHATFUEL_UNAVAILABLE');
+      if (body.errors?.some(item => item.extensions?.code === 'ConversationThreadOwnedByExternalApp'
+        || item.extensions?.errors?.some(nested => nested.extensions?.code === 'ConversationThreadOwnedByExternalApp'))) {
+        error.code = 'ConversationThreadOwnedByExternalApp';
+      }
+      throw error;
+    }
     return body.data;
   }
   async function setAttributes(contactId, fields) {
@@ -319,6 +330,48 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
     if (lead.persisted !== true || !lead.clientId) throw new Error('LEAD_NOT_PERSISTED');
     return String(lead.clientId);
   }
+  async function recoverUnassignedIncoming(node) {
+    const data = await graphql(`query IncomingRecoveryContext($botID:BotID!,$id:ContactID!,$conversationID:ConversationID!){
+      bot(id:$botID){contact(id:$id){id assignee{__typename} salesStageV2 unhandledSwitchToHuman
+        attributes(names:["bitrix_agenda_estado","bitrix_reserva_pendiente","crm_30x_incoming_recovery_hash"]){attr{name}value{... on BotAttributeValueString{stringValue}}}}
+        conversation(conversationID:$conversationID){status messages(first:20){edges{node{id __typename sentTime}}}}}}`,
+    { botID, id: node.id, conversationID: node.id });
+    const current = data.bot.contact, conversation = data.bot.conversation;
+    // Solo mensajes pendientes de atención automática. Nunca recuperar chats
+    // humanos, perfiles ya trabajados ni un diálogo de reserva en curso.
+    if (current.assignee || current.salesStageV2 !== 'New' || current.unhandledSwitchToHuman
+      || conversation.status !== 'automated') return;
+    const fields = attributeMap(current.attributes);
+    if (decode(fields.bitrix_agenda_estado, node.id) || yes(fields.bitrix_reserva_pendiente)) return;
+    const latest = conversation.messages.edges.map(edge => edge.node)
+      .find(message => /^WhatsApp(?:In|Out)/.test(message.__typename));
+    const age = now() - Date.parse(latest?.sentTime);
+    if (!latest?.__typename.startsWith('WhatsAppIn') || !Number.isFinite(age) || age < 0 || age >= 86_400_000) return;
+    const fingerprint = createHash('sha256').update(`${node.id}|${latest.id}`).digest('hex');
+    if (fields.crm_30x_incoming_recovery_hash === fingerprint || incomingRecoveryAttempts.get(node.id) === fingerprint) return true;
+    // Una respuesta perdida puede haber iniciado la IA. No repetir esa acción
+    // para el mismo mensaje mientras se verifica su resultado.
+    incomingRecoveryAttempts.set(node.id, fingerprint);
+    if (incomingRecoveryAttempts.size > 5000) incomingRecoveryAttempts.delete(incomingRecoveryAttempts.keys().next().value);
+    const assign = () => graphql('mutation IncomingRecoveryAssign($id:ContactID!){contactSetFuelyAIAssignee(id:$id){id assignee{__typename}}}', { id: node.id });
+    try {
+      let assigned;
+      try { assigned = await assign(); }
+      catch (error) {
+        if (error.code !== 'ConversationThreadOwnedByExternalApp') throw error;
+        const takeover = await graphql('mutation IncomingRecoveryTakeover($botID:BotID!,$id:ConversationID!){conversationStart(botID:$botID,conversationID:$id){id status}}', { botID, id: node.id });
+        if (takeover.conversationStart?.id !== node.id) throw new Error('INCOMING_TAKEOVER_FAILED');
+        assigned = await assign();
+      }
+      if (assigned.contactSetFuelyAIAssignee?.id !== node.id
+        || assigned.contactSetFuelyAIAssignee.assignee?.__typename !== 'FuelyAIAssignee') throw new Error('INCOMING_ASSIGN_FAILED');
+      handoffStatus.incomingRecovered++;
+      await setAttributes(node.id, { crm_30x_incoming_recovery_hash: fingerprint });
+      handoffStatus.incomingRecoveryLastError = null;
+    } catch { handoffStatus.incomingRecoveryLastError = 'INCOMING_RECOVERY_FAILED'; }
+    return true;
+  }
+
   async function synchronizeHandoffs() {
     if (syncing) return syncing;
     syncing = (async () => {
@@ -327,7 +380,7 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
       do {
         const data = await graphql(`query HandoffCandidates($botID:BotID!,$after:ContactSearchCursor,$names:[AttributeName!]){
           bot(id:$botID){contactChatsConnection(first:100,after:$after,assigneeFilter:{type:Any},unreadOnly:false,salesStageV2Filter:[]){
-            edges{node{id name assignee{__typename ... on PublicUserAccount{accountType}}
+            edges{node{id name salesStageV2 unhandledSwitchToHuman assignee{__typename ... on PublicUserAccount{accountType}}
               attributes(names:$names){attr{name}value{... on BotAttributeValueString{stringValue}
                 ... on BotAttributeValueBoolean{booleanValue} ... on BotAttributeValueDouble{doubleValue}}}
               ... on WhatsappContact{phone}}}pageInfo{hasNextPage endCursor}}}}`, { botID, after, names: ATTR });
@@ -337,6 +390,10 @@ export function createHandler({ env = process.env, fetchImpl = fetch, now = () =
           const phone = String(node.phone ?? '').replace(/\D/g, '');
           if (!/^\d{8,15}$/.test(phone)) continue;
           const fields = attributeMap(node.attributes);
+          if (handoffStatus.incomingRecoveryEnabled && !node.assignee && node.salesStageV2 === 'New'
+            && !node.unhandledSwitchToHuman) {
+            if (await recoverUnassignedIncoming(node)) continue;
+          }
           if (node.assignee?.__typename === 'FuelyAIAssignee') {
             const state = decode(fields.bitrix_agenda_estado, node.id);
             const active = state && ['name', 'city', 'active', 'period', 'day', 'choose', 'confirm', 'booking', 'confirmed', 'check_pending'].includes(state.step);
